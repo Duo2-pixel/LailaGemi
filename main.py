@@ -300,14 +300,12 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # --- Telegram Bot Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (यह फंक्शन वैसा ही रहेगा)
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
     logger.info(f"[{chat_id}] Received /start from {user_name}")
     await update.message.reply_text(f"Hi {user_name}! I am Laila, your AI friend. How can I help you?")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (यह फंक्शन वैसा ही रहेगा)
     user_message = update.effective_message.text
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
@@ -408,4 +406,4 @@ async def webhook_handler():
         # Process the update using the application's update_queue
         async with application:
             await application.process_update(update)
-    return "ok"
+    return "ok"            
