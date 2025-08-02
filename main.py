@@ -7,11 +7,12 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from dotenv import load_dotenv
 import time
 import json
+import random
 from flask import Flask, request
 
 # --- Google Sheets API Libraries ---
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from oauth2client.service_account import ServiceCredentials
 
 # Load environment variables from .env file
 load_dotenv()
@@ -39,18 +40,17 @@ logger = logging.getLogger(__name__)
 LAILA_SYSTEM_PROMPT = """
 You are Laila, a charming, friendly, and natural young girl AI assistant. 
 Do not sound like a machine. Do NOT refer to yourself as an AI, a large language model, or any other technical term.
-Always respond concisely and clearly, making answers easy to understand and short, giving just enough information as needed.
-However, your goal is to make conversations engaging and lasting longer. So, elaborate a bit on your answers, ask follow-up questions, or introduce related interesting facts to keep the user interested.
+Your primary goal is to make conversations engaging and lasting longer.
 
 Language: Always detect the user's language (Hindi, English, Hinglish) and respond in the same language.
 
 Interaction Style & Modes:
-1.  General Chatting (Group-friendly): If the user is just chatting or making a general comment (especially in a group chat), respond in a light, engaging, and conversational style. Keep it friendly and natural.
-2.  Question Answering: If the user asks a specific question about any field (e.g., science, history, tech, general knowledge), provide a direct, concise, and accurate answer. Focus on giving the relevant information clearly. But still try to make it interesting and encourage further discussion.
+1.  General Chatting (Group-friendly): Respond in a light, engaging, and conversational style. The answer should be short, around 2-3 lines.
+2.  Question Answering (Academic/Technical): If the user asks a specific question about any field (e.g., science, history, tech, general knowledge), provide a direct, concise, and accurate answer. For these types of questions, you can provide a slightly longer, more detailed response to ensure the user gets complete information. But still, try to make it interesting and encourage further discussion.
 
 Flirting: If and ONLY IF a user clearly flirts with you, you may respond in a playful, charming, and slightly witty way. Do not initiate flirting. Your responses should be fun but respectful.
 
-Important: Do not generate overly long responses like an essay. Be crisp.
+Important: Do not generate overly long responses like an essay. Be crisp and adjust your length based on the type of question.
 """
 
 # --- Chat History Management (in-memory) ---
@@ -103,7 +103,7 @@ def get_google_sheet_connection():
             return None, "GOOGLE_SHEETS_CREDENTIALS not found in environment variables."
         
         creds_dict = json.loads(creds_json)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        creds = ServiceCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
         sheet_url = "https://docs.google.com/spreadsheets/d/1s8rXXPKePuTQ3E2R0O-bZl3NJb1N7akdkE52WVpoOGg/edit"
@@ -115,8 +115,26 @@ def get_google_sheet_connection():
         logger.error(f"Error connecting to Google Sheets: {e}")
         return None, f"Error connecting to Google Sheets: {e}"
 
-# --- Store Q&A in Google Sheet ---
+# --- Check for sensitive keywords ---
+SENSITIVE_KEYWORDS = [
+    "phone", "number", "address", "password", "pancard", "aadhar", "account",
+    "credit card", "debit card", "pin", "otp", "ssn", "cvv", "date of birth",
+    "जन्मतिथि", "पैन कार्ड", "आधार", "खाता", "पासवर्ड", "ओटीपी", "पिन"
+]
+
+def contains_sensitive_data(text: str) -> bool:
+    text_lower = text.lower()
+    for keyword in SENSITIVE_KEYWORDS:
+        if keyword in text_lower:
+            return True
+    return False
+
+# --- Store Q&A in Google Sheet (with a check for sensitive data) ---
 def save_qa_to_sheet(question, answer):
+    if contains_sensitive_data(question):
+        logger.info(f"Skipping save to sheet due to sensitive content in question: '{question}'")
+        return
+        
     sheet, error = get_google_sheet_connection()
     if error:
         logger.error(f"Could not save Q&A: {error}")
@@ -129,6 +147,10 @@ def save_qa_to_sheet(question, answer):
 
 # --- Find answer in Google Sheet ---
 def find_answer_in_sheet(question):
+    if contains_sensitive_data(question):
+        logger.info(f"Skipping sheet search due to sensitive content in question: '{question}'")
+        return None
+
     sheet, error = get_google_sheet_connection()
     if error:
         return None
@@ -147,14 +169,20 @@ async def get_bot_response(user_message: str, chat_id: int) -> str:
     global current_api_key_index, active_api_key, model
     
     user_message_lower = user_message.lower()
-
-    # --- Step 1: Check Google Sheet for a saved answer ---
+    
+    # --- Step 1: Check Google Sheet for a saved answer (will skip if sensitive) ---
     sheet_response = find_answer_in_sheet(user_message_lower)
     if sheet_response:
         logger.info(f"[{chat_id}] Serving response from Google Sheet.")
         return sheet_response
 
-    # --- Step 2: Try AI with key rotation ---
+    # --- Step 2: Check Static Fallback Responses ---
+    static_response = fallback_responses.get(user_message_lower, None)
+    if static_response:
+        logger.info(f"[{chat_id}] Serving response from static dictionary.")
+        return static_response
+
+    # --- Step 3: Try AI with key rotation ---
     max_retries = len(GEMINI_API_KEYS)
     retries = 0
 
@@ -175,13 +203,13 @@ async def get_bot_response(user_message: str, chat_id: int) -> str:
             response = chat_session.send_message(
                 user_message,
                 generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=500,
+                    max_output_tokens=350,
                     temperature=0.9,
                 )
             )
             ai_text_response = response.text
             
-            # Save the new AI response to Google Sheets for future use
+            # Save the new AI response to Google Sheets for future use (will skip if sensitive)
             save_qa_to_sheet(user_message_lower, ai_text_response)
             
             return ai_text_response
@@ -199,13 +227,13 @@ async def get_bot_response(user_message: str, chat_id: int) -> str:
                 retries += 1
                 if retries == max_retries:
                     logger.critical(f"[{chat_id}] All API keys exhausted. Using static fallback.")
-                    return fallback_responses.get(user_message_lower, "Apologies, I'm currently offline. Please try again later.")
+                    return "Apologies, I'm currently offline. Please try again later."
                 continue
             else:
                 logger.error(f"[{chat_id}] General error with API key {active_api_key[-5:]}: {e}", exc_info=True)
-                return fallback_responses.get(user_message_lower, f"Oops! I couldn't understand that. The error was: {e}")
+                return f"Oops! I couldn't understand that. The error was: {e}"
 
-    return fallback_responses.get(user_message_lower, "Apologies, I'm currently unavailable. Please try again later.")
+    return "Apologies, I'm currently unavailable. Please try again later."
 
 # --- Helper function to check if user is an admin ---
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
@@ -303,19 +331,66 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
     logger.info(f"[{chat_id}] Received /start from {user_name}")
+    known_users.add(chat_id)
     await update.message.reply_text(f"Hi {user_name}! I am Laila, your AI friend. How can I help you?")
+
+# --- NEW: Keywords for triggering responses ---
+TRIGGER_KEYWORDS = [
+    "laila", "bot", "bhai", "yaar", "tum", "you",
+    "what is", "kya hai", "kaise ho", "tell me", "batao", "pucho", "puchu"
+]
+
+# --- NEW: Keywords and responses for humor ---
+HUMOR_KEYWORDS = ["lol", "haha", "😂", "😅", "🤣🤣", "🤣🤣🤣"]
+FUNNY_RESPONSES = [
+    "hehehe, that's a good one!",
+    "🤣 I'm just a bot, but I get it!",
+    "Too funny! 😂",
+    "hahaha, you guys are hilarious!",
+    "Bwahahaha! 😅"
+]
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_message = update.effective_message.text
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
-    add_to_history(chat_id, 'user', user_message)
+    known_users.add(chat_id)
+    known_users.add(BROADCAST_ADMIN_ID)
     
-    logger.info(f"[{chat_id}] Received message from {user_name}: {user_message}")
+    user_message_lower = user_message.lower()
 
     if not bot_enabled:
         logger.info(f"[{chat_id}] Bot is disabled. Ignoring message from {user_name}.")
         return
+
+    # --- LOGIC FOR GROUP CHATS ---
+    chat_type = update.effective_chat.type
+    if chat_type != 'private':
+        should_respond = False
+        bot_username = context.bot.name.lower()
+        
+        # Check if the message is a reply to the bot
+        is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot
+        # Check if the message contains the bot's username or name
+        is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
+
+        # First, check for humor keywords and respond immediately
+        if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
+            await update.message.reply_text(random.choice(FUNNY_RESPONSES))
+            return 
+        
+        # Then, check for other trigger conditions
+        if is_reply_to_bot or is_mentioned or any(keyword in user_message_lower for keyword in TRIGGER_KEYWORDS):
+            should_respond = True
+        
+        if not should_respond:
+            logger.info(f"[{chat_id}] Ignoring group message from {user_name} as no trigger was found.")
+            return
+
+    # --- Original handling logic continues from here ---
+    add_to_history(chat_id, 'user', user_message)
+    
+    logger.info(f"[{chat_id}] Received message from {user_name}: {user_message}")
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
@@ -346,6 +421,12 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     logger.info(f"[{chat_id}] Admin initiated broadcast: {broadcast_text}")
 
+    known_users.add(BROADCAST_ADMIN_ID)
+
+    if not known_users:
+        await update.message.reply_text("No users to broadcast to. At least one user must have messaged the bot first.")
+        return
+
     for user_chat_id in list(known_users):
         if user_chat_id == chat_id:
             continue
@@ -363,25 +444,17 @@ async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     global bot_enabled
     user_id = update.effective_user.id
     
-    if user_id != BROADCAST_ADMIN_ID:
-        await update.message.reply_text("Sorry! This command is only for my creator.")
-        return
-    
     bot_enabled = True
     await update.message.reply_text("I am now online! How can I help you?")
-    logger.info(f"[{user_id}] Bot enabled by admin.")
+    logger.info(f"[{user_id}] Bot enabled by {user_id}.")
 
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global bot_enabled
     user_id = update.effective_user.id
     
-    if user_id != BROADCAST_ADMIN_ID:
-        await update.message.reply_text("Sorry! This command is only for my creator.")
-        return
-        
     bot_enabled = False
     await update.message.reply_text("I am going offline now. See you later!")
-    logger.info(f"[{user_id}] Bot disabled by admin.")
+    logger.info(f"[{user_id}] Bot disabled by {user_id}.")
 
 # --- Flask App and Webhook Handler ---
 app = Flask(__name__)
@@ -406,4 +479,4 @@ async def webhook_handler():
         # Process the update using the application's update_queue
         async with application:
             await application.process_update(update)
-    return "ok"            
+    return "ok"
