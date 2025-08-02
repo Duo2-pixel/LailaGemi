@@ -12,7 +12,7 @@ from flask import Flask, request
 
 # --- Google Sheets API Libraries ---
 import gspread
-from oauth2client.service_account import ServiceCredentials
+from oauth2client.service_account import ServiceAccountCredentials
 
 # Load environment variables from .env file
 load_dotenv()
@@ -480,3 +480,4 @@ async def webhook_handler():
         async with application:
             await application.process_update(update)
     return "ok"
+
