@@ -193,7 +193,7 @@ def check_for_owner_question(text: str) -> bool:
     return False
 
 # --- AI Response Function with Fallback to Google Sheets ---
-async def get_bot_response(user_message: str, chat_id: int, bot_username: str, should_use_ai: bool) -> str:
+async def get_bot_response(user_message: str, chat_id: int, bot_username: str, should_use_ai: bool, update: Update) -> str:
     global current_api_key_index, active_api_key, model
     
     cleaned_user_message = clean_message_for_logging(user_message, bot_username)
@@ -215,7 +215,7 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
         return static_response
 
     # --- Step 4: Use AI only if explicitly required (in a private chat or if bot was mentioned/replied to) ---
-    if should_use_ai or update.effective_chat.type == 'private':
+    if should_use_ai or (update.effective_chat and update.effective_chat.type == 'private'):
         max_retries = len(GEMINI_API_KEYS)
         retries = 0
 
@@ -338,4 +338,129 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not update.message.reply_to_message:
         await update.message.reply_text("Please reply to a user's message to mute them.")
-        return        
+        return
+
+    target_user = update.message.reply_to_message.from_user
+    if await is_admin(context.bot, chat_id, target_user.id):
+        await update.message.reply_text("I cannot mute another admin.")
+        return
+
+    try:
+        # A mute is essentially restricting a user from sending messages
+        await context.bot.restrict_chat_member(
+            chat_id,
+            target_user.id,
+            permissions=None
+        )
+        await update.message.reply_text(f"{target_user.full_name} has been muted.")
+        logger.info(f"[{chat_id}] {user_id} muted {target_user.id}")
+    except Exception as e:
+        await update.message.reply_text(f"Could not mute user: {e}")
+        logger.error(f"[{chat_id}] Error muting user {target_user.id}: {e}")
+
+
+# --- Telegram Bot Handlers ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_name = update.effective_user.first_name
+    chat_id = update.effective_chat.id
+    logger.info(f"[{chat_id}] Received /start from {user_name}")
+    known_users.add(chat_id)
+
+    welcome_message = (
+        f"Hi {user_name}! I am Laila, your friendly AI assistant. I can chat, answer questions, and much more!\n\n"
+        "**Quick Privacy Notice:** To learn and give you faster, better answers, I save our conversations in a private log. This data is kept completely private and is never shared."
+    )
+
+    await update.message.reply_text(welcome_message)
+
+# --- Keywords for triggering responses ---
+TRIGGER_KEYWORDS = [
+    "laila", "bot", "bhai", "yaar", "tum", "you",
+    "what is", "kya hai", "kaise ho", "tell me", "batao", "pucho", "puchu"
+]
+
+# --- Keywords and responses for humor ---
+HUMOR_KEYWORDS = ["lol", "haha", "😂", "😅", "🤣🤣", "🤣🤣🤣"]
+FUNNY_RESPONSES = [
+    "hehehe, that's a good one!",
+    "🤣 I'm just a bot, but I get it!",
+    "Too funny! 😂",
+    "hahaha, you guys are hilarious!",
+    "Bwahahaha! 😅"
+]
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_message = update.effective_message.text
+    user_name = update.effective_user.first_name
+    chat_id = update.effective_chat.id
+    known_users.add(chat_id)
+    known_users.add(BROADCAST_ADMIN_ID)
+    
+    user_message_lower = user_message.lower()
+
+    if not bot_enabled:
+        logger.info(f"[{chat_id}] Bot is disabled. Ignoring message from {user_name}.")
+        return
+
+    # --- LOGIC FOR GROUP AND PRIVATE CHATS ---
+    chat_type = update.effective_chat.type
+    should_respond_with_ai = False
+    
+    # Check if the message is a reply to the bot or mentions the bot
+    if chat_type != 'private':
+        bot_username = context.bot.name.lower()
+        is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot
+        is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
+        
+        # Check for humor keywords and respond immediately
+        if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
+            await update.message.reply_text(random.choice(FUNNY_RESPONSES))
+            return 
+        
+        # Decide if we should use AI based on mention/reply
+        if is_reply_to_bot or is_mentioned:
+            should_respond_with_ai = True
+        
+    # --- Always try to get a response from the database first ---
+    add_to_history(chat_id, 'user', user_message)
+    logger.info(f"[{chat_id}] Received message from {user_name}: {user_message}")
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    bot_response = await get_bot_response(user_message, chat_id, context.bot.username, should_respond_with_ai, update)
+    
+    if bot_response:
+        if not ("Apologies, I can't discuss that topic" in bot_response or
+                "Oops! I couldn't understand that" in bot_response or
+                "Apologies, I'm currently offline" in bot_response):
+            add_to_history(chat_id, 'model', bot_response)
+
+        await update.message.reply_text(bot_response)
+    else:
+        logger.info(f"[{chat_id}] No response generated for message.")
+
+
+# --- Flask App and Webhook Handler ---
+app = Flask(__name__)
+
+# Application Builder (handlers ko yahan set kiya gaya hai)
+application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+application.add_handler(CommandHandler("start", start_command))
+application.add_handler(CommandHandler("broadcast", broadcast_message))
+application.add_handler(CommandHandler("on", on_command))
+application.add_handler(CommandHandler("off", off_command))
+# नए ग्रुप मैनेजमेंट कमांड्स यहाँ जोड़े गए हैं
+application.add_handler(CommandHandler("ban", ban_user))
+application.add_handler(CommandHandler("kick", kick_user))
+application.add_handler(CommandHandler("mute", mute_user))
+
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+@app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
+async def webhook_handler():
+    if request.method == "POST":
+        update = Update.de_json(request.json, application.bot)
+        # Process the update using the application's update_queue
+        async with application:
+            await application.process_update(update)
+    return "ok"
