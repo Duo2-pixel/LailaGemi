@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import time
 import json
 import random
+import re
 from flask import Flask, request
 
 # --- Google Sheets API Libraries ---
@@ -45,7 +46,7 @@ Your primary goal is to make conversations engaging and lasting longer.
 Language: Always detect the user's language (Hindi, English, Hinglish) and respond in the same language.
 
 Interaction Style & Modes:
-1.  General Chatting (Group-friendly): Respond in a light, engaging, and conversational style. The answer should be short, around 2-3 lines.
+1.  General Chatting (Group-friendly): Strictly keep the answers short, around 2-3 lines at most.
 2.  Question Answering (Academic/Technical): If the user asks a specific question about any field (e.g., science, history, tech, general knowledge), provide a direct, concise, and accurate answer. For these types of questions, you can provide a slightly longer, more detailed response to ensure the user gets complete information. But still, try to make it interesting and encourage further discussion.
 
 Flirting: If and ONLY IF a user clearly flirts with you, you may respond in a playful, charming, and slightly witty way. Do not initiate flirting. Your responses should be fun but respectful.
@@ -103,7 +104,7 @@ def get_google_sheet_connection():
             return None, "GOOGLE_SHEETS_CREDENTIALS not found in environment variables."
         
         creds_dict = json.loads(creds_json)
-        creds = ServiceCredentials.from_json_keyfile_dict(creds_dict, scope)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
         sheet_url = "https://docs.google.com/spreadsheets/d/1s8rXXPKePuTQ3E2R0O-bZl3NJb1N7akdkE52WVpoOGg/edit"
@@ -163,26 +164,44 @@ def find_answer_in_sheet(question):
     except Exception as e:
         logger.error(f"Error searching for answer in Google Sheet: {e}")
         return None
+        
+# --- NEW: Function to clean message before logging ---
+def clean_message_for_logging(message: str, bot_username: str) -> str:
+    # Convert to lowercase for easier processing
+    cleaned_message = message.lower()
+    
+    # Remove bot's username mention (@<username>)
+    cleaned_message = cleaned_message.replace(f"@{bot_username.lower()}", "")
+    
+    # Remove variations of the bot's name (e.g., laila, laila se, laila ko, laila ka)
+    cleaned_message = re.sub(r'laila\s*(ko|ka|se|ne|)\s*', '', cleaned_message, flags=re.IGNORECASE)
+    
+    # Remove extra spaces
+    cleaned_message = re.sub(r'\s+', ' ', cleaned_message).strip()
+    
+    return cleaned_message
 
 # --- AI Response Function with Fallback to Google Sheets ---
-async def get_bot_response(user_message: str, chat_id: int) -> str:
+async def get_bot_response(user_message: str, chat_id: int, bot_username: str) -> str:
     global current_api_key_index, active_api_key, model
     
-    user_message_lower = user_message.lower()
+    # NEW: Create a cleaned version of the message for logging
+    cleaned_user_message = clean_message_for_logging(user_message, bot_username)
     
-    # --- Step 1: Check Google Sheet for a saved answer (will skip if sensitive) ---
-    sheet_response = find_answer_in_sheet(user_message_lower)
+    # --- Step 1: Check Google Sheet for a saved answer (will use cleaned message) ---
+    sheet_response = find_answer_in_sheet(cleaned_user_message)
     if sheet_response:
         logger.info(f"[{chat_id}] Serving response from Google Sheet.")
         return sheet_response
 
     # --- Step 2: Check Static Fallback Responses ---
-    static_response = fallback_responses.get(user_message_lower, None)
+    # Use the cleaned message to check static fallbacks
+    static_response = fallback_responses.get(cleaned_user_message, None)
     if static_response:
         logger.info(f"[{chat_id}] Serving response from static dictionary.")
         return static_response
 
-    # --- Step 3: Try AI with key rotation ---
+    # --- Step 3: Try AI with key rotation (will use original message for better context) ---
     max_retries = len(GEMINI_API_KEYS)
     retries = 0
 
@@ -201,7 +220,7 @@ async def get_bot_response(user_message: str, chat_id: int) -> str:
 
             chat_session = model.start_chat(history=chat_histories[chat_id])
             response = chat_session.send_message(
-                user_message,
+                user_message,  # Use original message for the AI
                 generation_config=genai.types.GenerationConfig(
                     max_output_tokens=350,
                     temperature=0.9,
@@ -209,8 +228,8 @@ async def get_bot_response(user_message: str, chat_id: int) -> str:
             )
             ai_text_response = response.text
             
-            # Save the new AI response to Google Sheets for future use (will skip if sensitive)
-            save_qa_to_sheet(user_message_lower, ai_text_response)
+            # Save the new AI response to Google Sheets for future use (will use cleaned message)
+            save_qa_to_sheet(cleaned_user_message, ai_text_response)
             
             return ai_text_response
 
@@ -272,212 +291,4 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def kick_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
-    if not await is_admin(context.bot, chat_id, user_id):
-        await update.message.reply_text("Sorry, you need to be an admin to use this command.")
-        return
-
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Please reply to a user's message to kick them.")
-        return
-
-    target_user = update.message.reply_to_message.from_user
-    if await is_admin(context.bot, chat_id, target_user.id):
-        await update.message.reply_text("I cannot kick another admin.")
-        return
-
-    try:
-        await context.bot.unban_chat_member(chat_id, target_user.id)
-        await update.message.reply_text(f"{target_user.full_name} has been kicked.")
-        logger.info(f"[{chat_id}] {user_id} kicked {target_user.id}")
-    except Exception as e:
-        await update.message.reply_text(f"Could not kick user: {e}")
-        logger.error(f"[{chat_id}] Error kicking user {target_user.id}: {e}")
-
-async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
-    if not await is_admin(context.bot, chat_id, user_id):
-        await update.message.reply_text("Sorry, you need to be an admin to use this command.")
-        return
-
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Please reply to a user's message to mute them.")
-        return
-
-    target_user = update.message.reply_to_message.from_user
-    if await is_admin(context.bot, chat_id, target_user.id):
-        await update.message.reply_text("I cannot mute another admin.")
-        return
-
-    try:
-        # A mute is essentially restricting a user from sending messages
-        await context.bot.restrict_chat_member(
-            chat_id,
-            target_user.id,
-            permissions=None
-        )
-        await update.message.reply_text(f"{target_user.full_name} has been muted.")
-        logger.info(f"[{chat_id}] {user_id} muted {target_user.id}")
-    except Exception as e:
-        await update.message.reply_text(f"Could not mute user: {e}")
-        logger.error(f"[{chat_id}] Error muting user {target_user.id}: {e}")
-
-
-# --- Telegram Bot Handlers ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_name = update.effective_user.first_name
-    chat_id = update.effective_chat.id
-    logger.info(f"[{chat_id}] Received /start from {user_name}")
-    known_users.add(chat_id)
-    await update.message.reply_text(f"Hi {user_name}! I am Laila, your AI friend. How can I help you?")
-
-# --- NEW: Keywords for triggering responses ---
-TRIGGER_KEYWORDS = [
-    "laila", "bot", "bhai", "yaar", "tum", "you",
-    "what is", "kya hai", "kaise ho", "tell me", "batao", "pucho", "puchu"
-]
-
-# --- NEW: Keywords and responses for humor ---
-HUMOR_KEYWORDS = ["lol", "haha", "😂", "😅", "🤣🤣", "🤣🤣🤣"]
-FUNNY_RESPONSES = [
-    "hehehe, that's a good one!",
-    "🤣 I'm just a bot, but I get it!",
-    "Too funny! 😂",
-    "hahaha, you guys are hilarious!",
-    "Bwahahaha! 😅"
-]
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_message = update.effective_message.text
-    user_name = update.effective_user.first_name
-    chat_id = update.effective_chat.id
-    known_users.add(chat_id)
-    known_users.add(BROADCAST_ADMIN_ID)
-    
-    user_message_lower = user_message.lower()
-
-    if not bot_enabled:
-        logger.info(f"[{chat_id}] Bot is disabled. Ignoring message from {user_name}.")
-        return
-
-    # --- LOGIC FOR GROUP CHATS ---
-    chat_type = update.effective_chat.type
-    if chat_type != 'private':
-        should_respond = False
-        bot_username = context.bot.name.lower()
-        
-        # Check if the message is a reply to the bot
-        is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot
-        # Check if the message contains the bot's username or name
-        is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
-
-        # First, check for humor keywords and respond immediately
-        if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
-            await update.message.reply_text(random.choice(FUNNY_RESPONSES))
-            return 
-        
-        # Then, check for other trigger conditions
-        if is_reply_to_bot or is_mentioned or any(keyword in user_message_lower for keyword in TRIGGER_KEYWORDS):
-            should_respond = True
-        
-        if not should_respond:
-            logger.info(f"[{chat_id}] Ignoring group message from {user_name} as no trigger was found.")
-            return
-
-    # --- Original handling logic continues from here ---
-    add_to_history(chat_id, 'user', user_message)
-    
-    logger.info(f"[{chat_id}] Received message from {user_name}: {user_message}")
-
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
-    bot_response = await get_bot_response(user_message, chat_id)
-    
-    if not ("Apologies, I can't discuss that topic" in bot_response or
-            "Oops! I couldn't understand that" in bot_response or
-            "Apologies, I'm currently offline" in bot_response):
-        add_to_history(chat_id, 'model', bot_response)
-
-    await update.message.reply_text(bot_response)
-
-async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if user_id != BROADCAST_ADMIN_ID:
-        await update.message.reply_text("Sorry! This command is only for my creator.")
-        return
-
-    if not context.args:
-        await update.message.reply_text("Please write a message to broadcast. Example: /broadcast Hello everyone!")
-        return
-
-    broadcast_text = " ".join(context.args)
-    sent_count = 0
-    failed_count = 0
-    
-    logger.info(f"[{chat_id}] Admin initiated broadcast: {broadcast_text}")
-
-    known_users.add(BROADCAST_ADMIN_ID)
-
-    if not known_users:
-        await update.message.reply_text("No users to broadcast to. At least one user must have messaged the bot first.")
-        return
-
-    for user_chat_id in list(known_users):
-        if user_chat_id == chat_id:
-            continue
-        try:
-            await context.bot.send_message(chat_id=user_chat_id, text=f"**Laila's Message:**\n\n{broadcast_text}", parse_mode='Markdown')
-            sent_count += 1
-            logger.info(f"Broadcast sent to {user_chat_id}")
-        except Exception as e:
-            failed_count += 1
-            logger.error(f"Failed to send broadcast to {user_chat_id}: {e}")
-    
-    await update.message.reply_text(f"Message sent to {sent_count} users. Failed to send to {failed_count} users.")
-
-async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global bot_enabled
-    user_id = update.effective_user.id
-    
-    bot_enabled = True
-    await update.message.reply_text("I am now online! How can I help you?")
-    logger.info(f"[{user_id}] Bot enabled by {user_id}.")
-
-async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global bot_enabled
-    user_id = update.effective_user.id
-    
-    bot_enabled = False
-    await update.message.reply_text("I am going offline now. See you later!")
-    logger.info(f"[{user_id}] Bot disabled by {user_id}.")
-
-# --- Flask App and Webhook Handler ---
-app = Flask(__name__)
-
-# Application Builder (handlers ko yahan set kiya gaya hai)
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start_command))
-application.add_handler(CommandHandler("broadcast", broadcast_message))
-application.add_handler(CommandHandler("on", on_command))
-application.add_handler(CommandHandler("off", off_command))
-# नए ग्रुप मैनेजमेंट कमांड्स यहाँ जोड़े गए हैं
-application.add_handler(CommandHandler("ban", ban_user))
-application.add_handler(CommandHandler("kick", kick_user))
-application.add_handler(CommandHandler("mute", mute_user))
-
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-@app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
-async def webhook_handler():
-    if request.method == "POST":
-        update = Update.de_json(request.json, application.bot)
-        # Process the update using the application's update_queue
-        async with application:
-            await application.process_update(update)
-    return "ok"
-
+    user
