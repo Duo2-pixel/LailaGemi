@@ -193,12 +193,12 @@ def check_for_owner_question(text: str) -> bool:
     return False
 
 # --- AI Response Function with Fallback to Google Sheets ---
-async def get_bot_response(user_message: str, chat_id: int, bot_username: str) -> str:
+async def get_bot_response(user_message: str, chat_id: int, bot_username: str, should_use_ai: bool) -> str:
     global current_api_key_index, active_api_key, model
     
     cleaned_user_message = clean_message_for_logging(user_message, bot_username)
     
-    # --- Step 1: Check for owner-related questions (newly added) ---
+    # --- Step 1: Check for owner-related questions ---
     if check_for_owner_question(user_message):
         return "My creator is @AdhyanXlive"
 
@@ -214,58 +214,59 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str) -
         logger.info(f"[{chat_id}] Serving response from static dictionary.")
         return static_response
 
-    # --- Step 4: Try AI with key rotation (will use original message for better context) ---
-    max_retries = len(GEMINI_API_KEYS)
-    retries = 0
+    # --- Step 4: Use AI only if explicitly required (in a private chat or if bot was mentioned/replied to) ---
+    if should_use_ai or update.effective_chat.type == 'private':
+        max_retries = len(GEMINI_API_KEYS)
+        retries = 0
 
-    while retries < max_retries:
-        if time.time() < key_cooldown_until[active_api_key]:
-            current_api_key_index = (current_api_key_index + 1) % len(GEMINI_API_KEYS)
-            active_api_key = GEMINI_API_KEYS[current_api_key_index]
-            retries += 1
-            genai.configure(api_key=active_api_key)
-            model = genai.GenerativeModel(model_name, system_instruction=LAILA_SYSTEM_PROMPT)
-            continue
-
-        try:
-            genai.configure(api_key=active_api_key)
-            model = genai.GenerativeModel(model_name, system_instruction=LAILA_SYSTEM_PROMPT)
-
-            chat_session = model.start_chat(history=chat_histories[chat_id])
-            response = chat_session.send_message(
-                user_message,  # Use original message for the AI
-                generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=350,
-                    temperature=0.9,
-                )
-            )
-            ai_text_response = response.text
-            
-            # Save the new AI response to Google Sheets for future use (will use cleaned message)
-            save_qa_to_sheet(cleaned_user_message, ai_text_response)
-            
-            return ai_text_response
-
-        except genai.types.BlockedPromptException as e:
-            logger.warning(f"[{chat_id}] Gemini blocked prompt: {e}")
-            return "Apologies, I can't discuss that topic."
-
-        except Exception as e:
-            error_str = str(e)
-            if "429 Quota exceeded" in error_str or "You exceeded your current quota" in error_str:
-                key_cooldown_until[active_api_key] = time.time() + (24 * 60 * 60)
+        while retries < max_retries:
+            if time.time() < key_cooldown_until[active_api_key]:
                 current_api_key_index = (current_api_key_index + 1) % len(GEMINI_API_KEYS)
                 active_api_key = GEMINI_API_KEYS[current_api_key_index]
                 retries += 1
-                if retries == max_retries:
-                    logger.critical(f"[{chat_id}] All API keys exhausted. Using static fallback.")
-                    return "Apologies, I'm currently offline. Please try again later."
+                genai.configure(api_key=active_api_key)
+                model = genai.GenerativeModel(model_name, system_instruction=LAILA_SYSTEM_PROMPT)
                 continue
-            else:
-                logger.error(f"[{chat_id}] General error with API key {active_api_key[-5:]}: {e}", exc_info=True)
-                return f"Oops! I couldn't understand that. The error was: {e}"
 
-    return "Apologies, I'm currently unavailable. Please try again later."
+            try:
+                genai.configure(api_key=active_api_key)
+                model = genai.GenerativeModel(model_name, system_instruction=LAILA_SYSTEM_PROMPT)
+
+                chat_session = model.start_chat(history=chat_histories[chat_id])
+                response = chat_session.send_message(
+                    user_message,  # Use original message for the AI
+                    generation_config=genai.types.GenerationConfig(
+                        max_output_tokens=350,
+                        temperature=0.9,
+                    )
+                )
+                ai_text_response = response.text
+                
+                # Save the new AI response to Google Sheets for future use (will use cleaned message)
+                save_qa_to_sheet(cleaned_user_message, ai_text_response)
+                
+                return ai_text_response
+
+            except genai.types.BlockedPromptException as e:
+                logger.warning(f"[{chat_id}] Gemini blocked prompt: {e}")
+                return "Apologies, I can't discuss that topic."
+
+            except Exception as e:
+                error_str = str(e)
+                if "429 Quota exceeded" in error_str or "You exceeded your current quota" in error_str:
+                    key_cooldown_until[active_api_key] = time.time() + (24 * 60 * 60)
+                    current_api_key_index = (current_api_key_index + 1) % len(GEMINI_API_KEYS)
+                    active_api_key = GEMINI_API_KEYS[current_api_key_index]
+                    retries += 1
+                    if retries == max_retries:
+                        logger.critical(f"[{chat_id}] All API keys exhausted. Using static fallback.")
+                        return "Apologies, I'm currently offline. Please try again later."
+                    continue
+                else:
+                    logger.error(f"[{chat_id}] General error with API key {active_api_key[-5:]}: {e}", exc_info=True)
+                    return f"Oops! I couldn't understand that. The error was: {e}"
+
+    return None
 
 # --- Helper function to check if user is an admin ---
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
@@ -286,4 +287,55 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if not update.message.reply_to_message:
-        await            
+        await update.message.reply_text("Please reply to a user's message to ban them.")
+        return
+
+    target_user = update.message.reply_to_message.from_user
+    if await is_admin(context.bot, chat_id, target_user.id):
+        await update.message.reply_text("I cannot ban another admin.")
+        return
+
+    try:
+        await context.bot.ban_chat_member(chat_id, target_user.id)
+        await update.message.reply_text(f"{target_user.full_name} has been banned.")
+        logger.info(f"[{chat_id}] {user_id} banned {target_user.id}")
+    except Exception as e:
+        await update.message.reply_text(f"Could not ban user: {e}")
+        logger.error(f"[{chat_id}] Error banning user {target_user.id}: {e}")
+
+async def kick_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not await is_admin(context.bot, chat_id, user_id):
+        await update.message.reply_text("Sorry, you need to be an admin to use this command.")
+        return
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Please reply to a user's message to kick them.")
+        return
+
+    target_user = update.message.reply_to_message.from_user
+    if await is_admin(context.bot, chat_id, target_user.id):
+        await update.message.reply_text("I cannot kick another admin.")
+        return
+
+    try:
+        await context.bot.unban_chat_member(chat_id, target_user.id)
+        await update.message.reply_text(f"{target_user.full_name} has been kicked.")
+        logger.info(f"[{chat_id}] {user_id} kicked {target_user.id}")
+    except Exception as e:
+        await update.message.reply_text(f"Could not kick user: {e}")
+        logger.error(f"[{chat_id}] Error kicking user {target_user.id}: {e}")
+
+async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not await is_admin(context.bot, chat_id, user_id):
+        await update.message.reply_text("Sorry, you need to be an admin to use this command.")
+        return
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Please reply to a user's message to mute them.")
+        return        
