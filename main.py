@@ -10,8 +10,6 @@ import json
 import random
 import re
 from flask import Flask, request
-
-# --- Google Sheets API Libraries ---
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -66,7 +64,7 @@ def add_to_history(chat_id, role, text):
 known_users = set()
 
 # --- Bot Enable/Disable State (for admin control) ---
-bot_enabled = True
+bot_status = defaultdict(lambda: True)
 
 # --- API Key Management for Quota and Cooldown ---
 current_api_key_index = 0
@@ -165,18 +163,10 @@ def find_answer_in_sheet(question):
         
 # --- Function to clean message before logging ---
 def clean_message_for_logging(message: str, bot_username: str) -> str:
-    # Convert to lowercase for easier processing
     cleaned_message = message.lower()
-    
-    # Remove bot's username mention (@<username>)
     cleaned_message = cleaned_message.replace(f"@{bot_username.lower()}", "")
-    
-    # Remove variations of the bot's name (e.g., laila, laila se, laila ko, laila ka)
     cleaned_message = re.sub(r'laila\s*(ko|ka|se|ne|)\s*', '', cleaned_message, flags=re.IGNORECASE)
-    
-    # Remove extra spaces
     cleaned_message = re.sub(r'\s+', ' ', cleaned_message).strip()
-    
     return cleaned_message
 
 # --- Function to check for owner-related questions ---
@@ -196,23 +186,19 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
     
     cleaned_user_message = clean_message_for_logging(user_message, bot_username)
     
-    # --- Step 1: Check for owner-related questions ---
     if check_for_owner_question(user_message):
         return "My creator is @AdhyanXlive"
 
-    # --- Step 2: Check Google Sheet for a saved answer (will use cleaned message) ---
     sheet_response = find_answer_in_sheet(cleaned_user_message)
     if sheet_response:
         logger.info(f"[{chat_id}] Serving response from Google Sheet.")
         return sheet_response
 
-    # --- Step 3: Check Static Fallback Responses ---
     static_response = fallback_responses.get(cleaned_user_message, None)
     if static_response:
         logger.info(f"[{chat_id}] Serving response from static dictionary.")
         return static_response
 
-    # --- Step 4: Use AI only if explicitly required (in a private chat or if bot was mentioned/replied to) ---
     if should_use_ai or (update.effective_chat and update.effective_chat.type == 'private'):
         max_retries = len(GEMINI_API_KEYS)
         retries = 0
@@ -240,7 +226,6 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
                 )
                 ai_text_response = response.text
                 
-                # Save the new AI response to Google Sheets for future use (will use cleaned message)
                 save_qa_to_sheet(cleaned_user_message, ai_text_response)
                 
                 return ai_text_response
@@ -266,7 +251,6 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
 
     return None
 
-# --- Helper function to check if user is an admin ---
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -275,7 +259,6 @@ async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
         logger.error(f"Error checking admin status: {e}")
         return False
 
-# --- Group Management Handlers ---
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -283,16 +266,13 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin(context.bot, chat_id, user_id):
         await update.message.reply_text("Sorry, you need to be an admin to use this command.")
         return
-
     if not update.message.reply_to_message:
         await update.message.reply_text("Please reply to a user's message to ban them.")
         return
-
     target_user = update.message.reply_to_message.from_user
     if await is_admin(context.bot, chat_id, target_user.id):
         await update.message.reply_text("I cannot ban another admin.")
         return
-
     try:
         await context.bot.ban_chat_member(chat_id, target_user.id)
         await update.message.reply_text(f"{target_user.full_name} has been banned.")
@@ -308,16 +288,13 @@ async def kick_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin(context.bot, chat_id, user_id):
         await update.message.reply_text("Sorry, you need to be an admin to use this command.")
         return
-
     if not update.message.reply_to_message:
         await update.message.reply_text("Please reply to a user's message to kick them.")
         return
-
     target_user = update.message.reply_to_message.from_user
     if await is_admin(context.bot, chat_id, target_user.id):
         await update.message.reply_text("I cannot kick another admin.")
         return
-
     try:
         await context.bot.unban_chat_member(chat_id, target_user.id)
         await update.message.reply_text(f"{target_user.full_name} has been kicked.")
@@ -333,16 +310,13 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin(context.bot, chat_id, user_id):
         await update.message.reply_text("Sorry, you need to be an admin to use this command.")
         return
-
     if not update.message.reply_to_message:
         await update.message.reply_text("Please reply to a user's message to mute them.")
         return
-
     target_user = update.message.reply_to_message.from_user
     if await is_admin(context.bot, chat_id, target_user.id):
         await update.message.reply_text("I cannot mute another admin.")
         return
-
     try:
         await context.bot.restrict_chat_member(
             chat_id,
@@ -365,7 +339,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Hi {user_name}! I am Laila, your friendly AI assistant. I can chat, answer questions, and much more!\n\n"
         "**Quick Privacy Notice:** To learn and give you faster, better answers, I save our conversations in a private log. This data is kept completely private and is never shared."
     )
-
     await update.message.reply_text(welcome_message)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -373,10 +346,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
     known_users.add(chat_id)
-    
     user_message_lower = user_message.lower()
 
-    if not bot_enabled:
+    if not bot_status[chat_id]:
         logger.info(f"[{chat_id}] Bot is disabled. Ignoring message from {user_name}.")
         return
 
@@ -388,6 +360,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot
         is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
         
+        # --- Naya, aur behtar Feature: Song Play Request Check ---
+        song_keywords = ["play", "gaana", "song", "playlist", "chala do", "bajao", "vc par", "sunao"]
+        if is_mentioned and any(keyword in user_message_lower for keyword in song_keywords):
+            # Message se gaane ka naam nikalo
+            clean_message = re.sub(r'laila\s*(ko|ka|se|ne|)\s*', '', user_message, flags=re.IGNORECASE)
+            clean_message = re.sub(r'@{}.*'.format(re.escape(bot_username)), '', clean_message, flags=re.IGNORECASE)
+            
+            # Gaana bajane se related phrases hata do
+            for keyword in song_keywords:
+                clean_message = re.sub(r'\b' + re.escape(keyword) + r'\b', '', clean_message, flags=re.IGNORECASE)
+            
+            # Baaki bacha hua text hi songs ka title hoga
+            song_titles_raw = clean_message.strip()
+            
+            if not song_titles_raw:
+                await update.message.reply_text("Sorry, aapne gaane ka naam nahi bataya. Kripya gaane ka naam likhkar bhejein.")
+            else:
+                # Gaano ki list banane ke liye separators ka use
+                song_titles = [s.strip() for s in re.split(r'[,&\s]+|aur|and|or', song_titles_raw) if s.strip()]
+                
+                if len(song_titles) > 1:
+                    await update.message.reply_text("OK, main ek-ek karke play command bhej rahi hoon.")
+
+                for song_title in song_titles:
+                    await update.message.reply_text(f"/play {song_title}")
+                    logger.info(f"[{chat_id}] Handled song request for '{song_title}' from {user_name}")
+
+            return # Yahan se function band ho jayega, AI ke paas nahi jayega.
+
         HUMOR_KEYWORDS = ["lol", "haha", "😂", "😅", "🤣🤣", "🤣🤣🤣"]
         FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
         if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
@@ -401,7 +402,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"[{chat_id}] Received message from {user_name}: {user_message}")
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
     bot_response = await get_bot_response(user_message, chat_id, context.bot.username, should_respond_with_ai, update)
     
     if bot_response:
@@ -409,7 +409,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "Oops! I couldn't understand that" in bot_response or
                 "Apologies, I'm currently offline" in bot_response):
             add_to_history(chat_id, 'model', bot_response)
-
         await update.message.reply_text(bot_response)
     else:
         logger.info(f"[{chat_id}] No response generated for message.")
@@ -420,7 +419,6 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if user_id != BROADCAST_ADMIN_ID:
         await update.message.reply_text("Sorry, you don't have permission to use this command.")
         return
-
     if not context.args:
         await update.message.reply_text("Please provide a message to broadcast.")
         return
@@ -448,26 +446,38 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global bot_enabled
+    global bot_status
+    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    if user_id == BROADCAST_ADMIN_ID:
-        bot_enabled = True
-        await update.message.reply_text("Bot is now ON.")
+    
+    if not update.effective_chat.type in ['group', 'supergroup']:
+        await update.message.reply_text("This command can only be used in a group chat.")
+        return
+
+    if await is_admin(context.bot, chat_id, user_id):
+        bot_status[chat_id] = True
+        await update.message.reply_text("Bot is now ON for this group.")
+        logger.info(f"[{chat_id}] Bot was turned ON by {user_id}")
     else:
-        await update.message.reply_text("You are not authorized to use this command.")
+        await update.message.reply_text("You need to be an admin of this group to use this command.")
 
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global bot_enabled
+    global bot_status
+    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    if user_id == BROADCAST_ADMIN_ID:
-        bot_enabled = False
-        await update.message.reply_text("Bot is now OFF. I will not respond to messages until turned ON.")
+    
+    if not update.effective_chat.type in ['group', 'supergroup']:
+        await update.message.reply_text("This command can only be used in a group chat.")
+        return
+
+    if await is_admin(context.bot, chat_id, user_id):
+        bot_status[chat_id] = False
+        await update.message.reply_text("Bot is now OFF for this group. I will not respond until turned ON.")
+        logger.info(f"[{chat_id}] Bot was turned OFF by {user_id}")
     else:
-        await update.message.reply_text("You are not authorized to use this command.")
+        await update.message.reply_text("You need to be an admin of this group to use this command.")
 
-# --- Flask App and Webhook Handler ---
 app = Flask(__name__)
-
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CommandHandler("broadcast", broadcast_message))
@@ -484,6 +494,4 @@ async def webhook_handler():
         update = Update.de_json(request.json, application.bot)
         async with application:
             await application.process_update(update)
-    return "ok"            
-        
-
+    return "ok"                               
