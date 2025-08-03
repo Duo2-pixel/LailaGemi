@@ -60,6 +60,27 @@ def add_to_history(chat_id, role, text):
     if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
         chat_histories[chat_id].pop(0)
 
+# --- Song List Management (in-memory) ---
+# Store the last provided song list by chat_id
+song_lists = defaultdict(list)
+
+def store_song_list(chat_id, text_response):
+    """Parses an AI response for a numbered or bulleted list of songs and stores it."""
+    songs = []
+    # Regex to find numbered or bulleted lists
+    matches = re.findall(r'(\d+\.\s*|[-*]\s*)(.+)', text_response)
+    if not matches:
+        # Fallback for comma-separated or simple lists
+        song_names = [s.strip() for s in re.split(r'[,&\s]+|aur|and|or', text_response) if s.strip()]
+        if len(song_names) > 1 and len(song_names) < 10:  # Avoid storing single words or very long lists
+            songs = song_names
+    else:
+        songs = [match[1].strip() for match in matches]
+    
+    if songs:
+        song_lists[chat_id] = songs
+        logger.info(f"[{chat_id}] Stored song list: {song_lists[chat_id]}")
+
 # --- User Tracking for Broadcast ---
 known_users = set()
 
@@ -228,6 +249,10 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
                 
                 save_qa_to_sheet(cleaned_user_message, ai_text_response)
                 
+                # Check for a song list and store it
+                if "list do" in cleaned_user_message:
+                    store_song_list(chat_id, ai_text_response)
+                
                 return ai_text_response
 
             except genai.types.BlockedPromptException as e:
@@ -360,41 +385,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot
         is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
         
-        # --- Naya, aur behtar Feature: Song Play Request Check ---
-        play_keywords = ["play", "chala do", "bajao", "vc par", "sunao", "play it", "play this"]
-        info_keywords = ["lyrics", "list", "ka naam", "kya hai", "batao"]
+        if is_mentioned:
+            # --- Special Handling for Play List and Play by Number ---
+            # Check for "sabko play kar do"
+            if any(word in user_message_lower for word in ["sabko", "all", "saare"]) and ("play" in user_message_lower or "chala do" in user_message_lower) and song_lists[chat_id]:
+                logger.info(f"[{chat_id}] User requested playing all songs from the list.")
+                for song in song_lists[chat_id]:
+                    await update.message.reply_text(f"/play {song.strip()}")
+                return
+            
+            # Check for "2 ya 3 no wala gaana"
+            match = re.search(r'(\d+)\s*(ya|or|aur)\s*(\d+)\s*(no|no.)', user_message_lower)
+            if match and song_lists[chat_id]:
+                try:
+                    song_numbers = [int(match.group(1)), int(match.group(3))]
+                    for num in song_numbers:
+                        if 0 < num <= len(song_lists[chat_id]):
+                            song_to_play = song_lists[chat_id][num - 1]
+                            await update.message.reply_text(f"/play {song_to_play.strip()}")
+                    return
+                except (ValueError, IndexError):
+                    pass # Fall through to the next check
 
-        is_play_request = any(keyword in user_message_lower for keyword in play_keywords)
-        is_info_request = any(keyword in user_message_lower for keyword in info_keywords)
+            # Check for "1 no wala gaana"
+            match = re.search(r'(\d+)\s*(no|no.)', user_message_lower)
+            if match and song_lists[chat_id]:
+                try:
+                    song_number = int(match.group(1))
+                    if 0 < song_number <= len(song_lists[chat_id]):
+                        song_to_play = song_lists[chat_id][song_number - 1]
+                        await update.message.reply_text(f"/play {song_to_play.strip()}")
+                        return
+                    else:
+                        await update.message.reply_text("Sorry, woh number list mein nahi hai.")
+                        return
+                except (ValueError, IndexError):
+                    pass # Fall through to the next check
 
-        if is_mentioned and is_play_request and not is_info_request:
-            # Message se gaane ka naam nikalo
-            clean_message = re.sub(r'laila\s*(ko|ka|se|ne|)\s*', '', user_message, flags=re.IGNORECASE)
-            clean_message = re.sub(r'@{}.*'.format(re.escape(bot_username)), '', clean_message, flags=re.IGNORECASE)
-            
-            # Gaana bajane se related phrases hata do
-            for keyword in play_keywords:
-                clean_message = re.sub(r'\b' + re.escape(keyword) + r'\b', '', clean_message, flags=re.IGNORECASE)
-            
-            # Baaki bacha hua text hi songs ka title hoga
-            song_titles_raw = clean_message.strip()
-            
-            if not song_titles_raw:
-                await update.message.reply_text("Sorry, aapne gaane ka naam nahi bataya. Kripya gaane ka naam likhkar bhejein.")
-            else:
-                # Gaano ki list banane ke liye separators ka use
-                song_titles = [s.strip() for s in re.split(r'[,&\s]+|aur|and|or', song_titles_raw) if s.strip()]
+            # --- Normal Play Request Check ---
+            play_keywords = ["play", "chala do", "bajao", "vc par", "sunao", "play it", "play this"]
+            info_keywords = ["lyrics", "list", "ka naam", "kya hai", "batao"]
+            is_play_request = any(keyword in user_message_lower for keyword in play_keywords)
+            is_info_request = any(keyword in user_message_lower for keyword in info_keywords)
+
+            if is_play_request and not is_info_request:
+                # Message se gaane ka naam nikalo
+                clean_message = re.sub(r'laila\s*(ko|ka|se|ne|)\s*', '', user_message, flags=re.IGNORECASE)
+                clean_message = re.sub(r'@{}.*'.format(re.escape(bot_username)), '', clean_message, flags=re.IGNORECASE)
                 
-                if len(song_titles) > 1:
-                    await update.message.reply_text("OK, main ek-ek karke play command bhej rahi hoon.")
-
-                for song_title in song_titles:
+                # Gaana bajane se related phrases hata do
+                for keyword in play_keywords:
+                    clean_message = re.sub(r'\b' + re.escape(keyword) + r'\b', '', clean_message, flags=re.IGNORECASE)
+                
+                song_title = clean_message.strip()
+                
+                if not song_title:
+                    await update.message.reply_text("Sorry, aapne gaane ka naam nahi bataya. Kripya gaane ka naam likhkar bhejein.")
+                else:
                     await update.message.reply_text(f"/play {song_title}")
-                    logger.info(f"[{chat_id}] Handled song request for '{song_title}' from {user_name}")
+                    logger.info(f"[{chat_id}] Handled single song request for '{song_title}' from {user_name}")
 
-            return # Yahan se function band ho jayega, AI ke paas nahi jayega.
+                return
         
-        HUMOR_KEYWORDS = ["lol", "haha", "😂", "😅", "🤣🤣", "🤣🤣🤣"]
+        # --- Humour Check (without the '😅' emoji) ---
+        HUMOR_KEYWORDS = ["lol", "haha", "😂", "🤣🤣", "🤣🤣🤣"]
         FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
         if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
             await update.message.reply_text(random.choice(FUNNY_RESPONSES))
@@ -414,6 +468,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "Oops! I couldn't understand that" in bot_response or
                 "Apologies, I'm currently offline" in bot_response):
             add_to_history(chat_id, 'model', bot_response)
+        
+        # Check if the AI response is a list of songs, and if so, store it
+        if "list do" in user_message_lower:
+            store_song_list(chat_id, bot_response)
+            
         await update.message.reply_text(bot_response)
     else:
         logger.info(f"[{chat_id}] No response generated for message.")
@@ -453,34 +512,26 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global bot_status
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
     
     if not update.effective_chat.type in ['group', 'supergroup']:
         await update.message.reply_text("This command can only be used in a group chat.")
         return
 
-    if await is_admin(context.bot, chat_id, user_id):
-        bot_status[chat_id] = True
-        await update.message.reply_text("Bot is now ON for this group.")
-        logger.info(f"[{chat_id}] Bot was turned ON by {user_id}")
-    else:
-        await update.message.reply_text("You need to be an admin of this group to use this command.")
+    bot_status[chat_id] = True
+    await update.message.reply_text("Bot is now ON for this group.")
+    logger.info(f"[{chat_id}] Bot was turned ON by {update.effective_user.id}")
 
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global bot_status
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
     
     if not update.effective_chat.type in ['group', 'supergroup']:
         await update.message.reply_text("This command can only be used in a group chat.")
         return
 
-    if await is_admin(context.bot, chat_id, user_id):
-        bot_status[chat_id] = False
-        await update.message.reply_text("Bot is now OFF for this group. I will not respond until turned ON.")
-        logger.info(f"[{chat_id}] Bot was turned OFF by {user_id}")
-    else:
-        await update.message.reply_text("You need to be an admin of this group to use this command.")
+    bot_status[chat_id] = False
+    await update.message.reply_text("Bot is now OFF for this group. I will not respond until turned ON.")
+    logger.info(f"[{chat_id}] Bot was turned OFF by {update.effective_user.id}")
 
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -499,5 +550,4 @@ async def webhook_handler():
         update = Update.de_json(request.json, application.bot)
         async with application:
             await application.process_update(update)
-    return "ok"        
-        
+    return "ok"
