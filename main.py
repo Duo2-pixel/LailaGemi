@@ -361,14 +361,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
         
         # --- Naya, aur behtar Feature: Song Play Request Check ---
-        song_keywords = ["play", "gaana", "song", "playlist", "chala do", "bajao", "vc par", "sunao"]
-        if is_mentioned and any(keyword in user_message_lower for keyword in song_keywords):
+        play_keywords = ["play", "chala do", "bajao", "vc par", "sunao", "play it", "play this"]
+        info_keywords = ["lyrics", "list", "ka naam", "kya hai", "batao"]
+
+        is_play_request = any(keyword in user_message_lower for keyword in play_keywords)
+        is_info_request = any(keyword in user_message_lower for keyword in info_keywords)
+
+        if is_mentioned and is_play_request and not is_info_request:
             # Message se gaane ka naam nikalo
             clean_message = re.sub(r'laila\s*(ko|ka|se|ne|)\s*', '', user_message, flags=re.IGNORECASE)
             clean_message = re.sub(r'@{}.*'.format(re.escape(bot_username)), '', clean_message, flags=re.IGNORECASE)
             
             # Gaana bajane se related phrases hata do
-            for keyword in song_keywords:
+            for keyword in play_keywords:
                 clean_message = re.sub(r'\b' + re.escape(keyword) + r'\b', '', clean_message, flags=re.IGNORECASE)
             
             # Baaki bacha hua text hi songs ka title hoga
@@ -388,7 +393,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     logger.info(f"[{chat_id}] Handled song request for '{song_title}' from {user_name}")
 
             return # Yahan se function band ho jayega, AI ke paas nahi jayega.
-
+        
         HUMOR_KEYWORDS = ["lol", "haha", "😂", "😅", "🤣🤣", "🤣🤣🤣"]
         FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
         if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
@@ -494,4 +499,5 @@ async def webhook_handler():
         update = Update.de_json(request.json, application.bot)
         async with application:
             await application.process_update(update)
-    return "ok"                               
+    return "ok"        
+        
