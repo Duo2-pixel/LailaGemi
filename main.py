@@ -11,7 +11,9 @@ import random
 import re
 from flask import Flask, request
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from oauth2client.service_account import ServiceCredentials
+import psutil
+from datetime import datetime
 
 # Load environment variables from .env file
 load_dotenv()
@@ -26,6 +28,10 @@ GEMINI_API_KEYS = [
     os.getenv("GEMINI_API_KEY_5"),
 ]
 BROADCAST_ADMIN_ID = int(os.getenv("BROADCAST_ADMIN_ID"))
+
+# --- Global Stats Variables ---
+start_time = datetime.now()
+total_messages_processed = 0
 
 # --- Logging Basic Configuration ---
 logging.basicConfig(
@@ -59,27 +65,6 @@ def add_to_history(chat_id, role, text):
     chat_histories[chat_id].append({'role': role, 'parts': [text]})
     if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
         chat_histories[chat_id].pop(0)
-
-# --- Song List Management (in-memory) ---
-# Store the last provided song list by chat_id
-song_lists = defaultdict(list)
-
-def store_song_list(chat_id, text_response):
-    """Parses an AI response for a numbered or bulleted list of songs and stores it."""
-    songs = []
-    # Regex to find numbered or bulleted lists
-    matches = re.findall(r'(\d+\.\s*|[-*]\s*)(.+)', text_response)
-    if not matches:
-        # Fallback for comma-separated or simple lists
-        song_names = [s.strip() for s in re.split(r'[,&\s]+|aur|and|or', text_response) if s.strip()]
-        if len(song_names) > 1 and len(song_names) < 10:  # Avoid storing single words or very long lists
-            songs = song_names
-    else:
-        songs = [match[1].strip() for match in matches]
-    
-    if songs:
-        song_lists[chat_id] = songs
-        logger.info(f"[{chat_id}] Stored song list: {song_lists[chat_id]}")
 
 # --- User Tracking for Broadcast ---
 known_users = set()
@@ -121,7 +106,7 @@ def get_google_sheet_connection():
             return None, "GOOGLE_SHEETS_CREDENTIALS not found in environment variables."
         
         creds_dict = json.loads(creds_json)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        creds = ServiceCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
         sheet_url = "https://docs.google.com/spreadsheets/d/1s8rXXPKePuTQ3E2R0O-bZl3NJb1N7akdkE52WVpoOGg/edit"
@@ -193,7 +178,7 @@ def clean_message_for_logging(message: str, bot_username: str) -> str:
 # --- Function to check for owner-related questions ---
 def check_for_owner_question(text: str) -> bool:
     owner_keywords = [
-        "kisne banaya", "owner kon", "who created", "who is your owner", "creator"
+        "kisne banaya", "owner kon", "who created", "who is your owner", "creator", "tumhe kisne bnaya"
     ]
     text_lower = text.lower()
     for keyword in owner_keywords:
@@ -206,9 +191,6 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
     global current_api_key_index, active_api_key, model
     
     cleaned_user_message = clean_message_for_logging(user_message, bot_username)
-    
-    if check_for_owner_question(user_message):
-        return "My creator is @AdhyanXlive"
 
     sheet_response = find_answer_in_sheet(cleaned_user_message)
     if sheet_response:
@@ -248,10 +230,6 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
                 ai_text_response = response.text
                 
                 save_qa_to_sheet(cleaned_user_message, ai_text_response)
-                
-                # Check for a song list and store it
-                if "list do" in cleaned_user_message:
-                    store_song_list(chat_id, ai_text_response)
                 
                 return ai_text_response
 
@@ -366,12 +344,94 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     await update.message.reply_text(welcome_message)
 
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows the bot's current stats in a formatted message."""
+    global start_time, total_messages_processed
+    
+    ping_start = time.time()
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    ping_end = time.time()
+    
+    uptime = datetime.now() - start_time
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{uptime.days}d {hours}h {minutes}m {seconds}s"
+    
+    ram_usage = psutil.virtual_memory().percent
+    cpu_usage = psutil.cpu_percent(interval=1)
+    disk_usage = psutil.disk_usage('/').percent
+    
+    response_text = (
+        "❤️ **Laila's Live Stats** ❤️\n\n"
+        f"⚡️ **Ping**: `{int((ping_end - ping_start) * 1000)}ms`\n"
+        f"⏳ **Uptime**: `{uptime_str}`\n"
+        f"👥 **Chats**: `{len(known_users)}`\n"
+        f"💬 **Messages**: `{total_messages_processed}`\n"
+        f"🧠 **RAM**: `{ram_usage}%`\n"
+        f"💻 **CPU**: `{cpu_usage}%`\n"
+        f"💾 **Disk**: `{disk_usage}%`\n\n"
+        "✨ by AdhyanXlive ✨"
+    )
+    await update.message.reply_text(response_text, parse_mode='Markdown')
+    logger.info(f"[{update.effective_chat.id}] /stats command used. Uptime: {uptime_str}")
+
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows detailed bot stats for the admin only."""
+    user_id = update.effective_user.id
+
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, you don't have permission to use this command.")
+        return
+
+    ping_start = time.time()
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    ping_end = time.time()
+    
+    uptime = datetime.now() - start_time
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{uptime.days}d {hours}h {minutes}m {seconds}s"
+    
+    ram_usage = psutil.virtual_memory().percent
+    cpu_usage = psutil.cpu_percent(interval=1)
+    disk_usage = psutil.disk_usage('/').percent
+    
+    # --- API Key Status ---
+    api_key_status_text = ""
+    for i, key in enumerate(GEMINI_API_KEYS):
+        key_short = key[-5:]
+        status = "Active" if key == active_api_key else "Inactive"
+        if time.time() < key_cooldown_until[key]:
+            cooldown_remaining = int(key_cooldown_until[key] - time.time())
+            status = f"Cooldown ({cooldown_remaining}s)"
+        api_key_status_text += f"Key {i+1} (`...{key_short}`): {status}\n"
+
+    response_text = (
+        "👑 **Laila's Admin Report** 👑\n\n"
+        "**System Health**\n"
+        f" Ping: `{int((ping_end - ping_start) * 1000)}ms`\n"
+        f" Uptime: `{uptime_str}`\n"
+        f" RAM: `{ram_usage}%`\n"
+        f" CPU: `{cpu_usage}%`\n"
+        f" Disk: `{disk_usage}%`\n\n"
+        "**Bot Stats**\n"
+        f" Total Chats: `{len(known_users)}`\n"
+        f" Total Messages: `{total_messages_processed}`\n\n"
+        "**API Status**\n"
+        f"{api_key_status_text}"
+        "\n✨ by AdhyanXlive ✨"
+    )
+    await update.message.reply_text(response_text, parse_mode='Markdown')
+    logger.info(f"[{update.effective_chat.id}] /adminstats command used by admin.")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global total_messages_processed
     user_message = update.effective_message.text
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
     known_users.add(chat_id)
     user_message_lower = user_message.lower()
+    total_messages_processed += 1
 
     if not bot_status[chat_id]:
         logger.info(f"[{chat_id}] Bot is disabled. Ignoring message from {user_name}.")
@@ -380,79 +440,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_type = update.effective_chat.type
     should_respond_with_ai = False
     
+    # Check for "your stats" or similar phrases
+    stats_keywords = ["your stats", "laila stats", "show stats", "bot stats", "stats"]
+    if any(keyword in user_message_lower for keyword in stats_keywords):
+        await stats_command(update, context)
+        return
+
     if chat_type != 'private':
         bot_username = context.bot.name.lower()
         is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot
         is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
         
         if is_mentioned:
-            # --- Special Handling for Play List and Play by Number ---
-            # Check for "sabko play kar do"
-            if any(word in user_message_lower for word in ["sabko", "all", "saare"]) and ("play" in user_message_lower or "chala do" in user_message_lower) and song_lists[chat_id]:
-                logger.info(f"[{chat_id}] User requested playing all songs from the list.")
-                for song in song_lists[chat_id]:
-                    await update.message.reply_text(f"/play {song.strip()}")
-                return
-            
-            # Check for "2 ya 3 no wala gaana"
-            match = re.search(r'(\d+)\s*(ya|or|aur)\s*(\d+)\s*(no|no.)', user_message_lower)
-            if match and song_lists[chat_id]:
-                try:
-                    song_numbers = [int(match.group(1)), int(match.group(3))]
-                    for num in song_numbers:
-                        if 0 < num <= len(song_lists[chat_id]):
-                            song_to_play = song_lists[chat_id][num - 1]
-                            await update.message.reply_text(f"/play {song_to_play.strip()}")
-                    return
-                except (ValueError, IndexError):
-                    pass # Fall through to the next check
-
-            # Check for "1 no wala gaana"
-            match = re.search(r'(\d+)\s*(no|no.)', user_message_lower)
-            if match and song_lists[chat_id]:
-                try:
-                    song_number = int(match.group(1))
-                    if 0 < song_number <= len(song_lists[chat_id]):
-                        song_to_play = song_lists[chat_id][song_number - 1]
-                        await update.message.reply_text(f"/play {song_to_play.strip()}")
-                        return
-                    else:
-                        await update.message.reply_text("Sorry, woh number list mein nahi hai.")
-                        return
-                except (ValueError, IndexError):
-                    pass # Fall through to the next check
-
-            # --- Normal Play Request Check ---
-            play_keywords = ["play", "chala do", "bajao", "vc par", "sunao", "play it", "play this"]
-            info_keywords = ["lyrics", "list", "ka naam", "kya hai", "batao"]
-            is_play_request = any(keyword in user_message_lower for keyword in play_keywords)
-            is_info_request = any(keyword in user_message_lower for keyword in info_keywords)
-
-            if is_play_request and not is_info_request:
-                # Message se gaane ka naam nikalo
-                clean_message = re.sub(r'laila\s*(ko|ka|se|ne|)\s*', '', user_message, flags=re.IGNORECASE)
-                clean_message = re.sub(r'@{}.*'.format(re.escape(bot_username)), '', clean_message, flags=re.IGNORECASE)
-                
-                # Gaana bajane se related phrases hata do
-                for keyword in play_keywords:
-                    clean_message = re.sub(r'\b' + re.escape(keyword) + r'\b', '', clean_message, flags=re.IGNORECASE)
-                
-                song_title = clean_message.strip()
-                
-                if not song_title:
-                    await update.message.reply_text("Sorry, aapne gaane ka naam nahi bataya. Kripya gaane ka naam likhkar bhejein.")
-                else:
-                    await update.message.reply_text(f"/play {song_title}")
-                    logger.info(f"[{chat_id}] Handled single song request for '{song_title}' from {user_name}")
-
+            # --- Owner Question Check ---
+            if check_for_owner_question(user_message):
+                await update.message.reply_text("My creator is @AdhyanXlive")
                 return
         
-        # --- Humour Check (without the '😅' emoji) ---
-        HUMOR_KEYWORDS = ["lol", "haha", "😂", "🤣🤣", "🤣🤣🤣"]
-        FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
-        if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
-            await update.message.reply_text(random.choice(FUNNY_RESPONSES))
-            return 
+            # --- Humour Check (without the '😅' emoji) ---
+            HUMOR_KEYWORDS = ["lol", "haha", "😂", "🤣🤣", "🤣🤣🤣"]
+            FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
+            if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
+                await update.message.reply_text(random.choice(FUNNY_RESPONSES))
+                return 
         
         if is_reply_to_bot or is_mentioned:
             should_respond_with_ai = True
@@ -468,10 +478,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "Oops! I couldn't understand that" in bot_response or
                 "Apologies, I'm currently offline" in bot_response):
             add_to_history(chat_id, 'model', bot_response)
-        
-        # Check if the AI response is a list of songs, and if so, store it
-        if "list do" in user_message_lower:
-            store_song_list(chat_id, bot_response)
             
         await update.message.reply_text(bot_response)
     else:
@@ -542,6 +548,8 @@ application.add_handler(CommandHandler("off", off_command))
 application.add_handler(CommandHandler("ban", ban_user))
 application.add_handler(CommandHandler("kick", kick_user))
 application.add_handler(CommandHandler("mute", mute_user))
+application.add_handler(CommandHandler("stats", stats_command))
+application.add_handler(CommandHandler("adminstats", admin_stats_command)) # New Admin Command
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 @app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
