@@ -1,7 +1,7 @@
-python-telegram-bot
-Flask[async]
-python-dotenv
-gunicorn
-gspread
-oauth2client
-google-generativeai
+python-telegram-bot==20.8
+google-generativeai==0.7.0
+python-dotenv==1.0.1
+Flask==3.0.3
+gspread==6.1.1
+oauth2client==4.1.2
+psutil==5.9.8
