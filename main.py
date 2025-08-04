@@ -11,7 +11,6 @@ import random
 import re
 from flask import Flask, request
 import gspread
-from oauth2client.service_account import ServiceCredentials
 import psutil
 from datetime import datetime
 
@@ -97,17 +96,14 @@ def get_google_sheet_connection():
     global google_sheet
     if google_sheet:
         return google_sheet, None
-
     try:
-        scope = ["https://spreadsheets.google.com/feeds", 'https://www.googleapis.com/auth/drive']
-        
         creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
         if not creds_json:
             return None, "GOOGLE_SHEETS_CREDENTIALS not found in environment variables."
         
         creds_dict = json.loads(creds_json)
-        creds = ServiceCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
+        
+        client = gspread.service_account_from_dict(creds_dict)
         
         sheet_url = "https://docs.google.com/spreadsheets/d/1s8rXXPKePuTQ3E2R0O-bZl3NJb1N7akdkE52WVpoOGg/edit"
         google_sheet = client.open_by_url(sheet_url).sheet1
