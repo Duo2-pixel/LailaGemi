@@ -26,7 +26,13 @@ GEMINI_API_KEYS = [
     os.getenv("GEMINI_API_KEY_4"),
     os.getenv("GEMINI_API_KEY_5"),
 ]
-BROADCAST_ADMIN_ID = int(os.getenv("BROADCAST_ADMIN_ID"))
+
+try:
+    BROADCAST_ADMIN_ID = int(os.getenv("BROADCAST_ADMIN_ID"))
+except (ValueError, TypeError):
+    BROADCAST_ADMIN_ID = 0
+    logging.error("BROADCAST_ADMIN_ID is missing or not a valid number. Broadcast functionality will be disabled.")
+
 
 # --- Global Stats Variables ---
 start_time = datetime.now()
@@ -473,3 +479,85 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not ("Apologies, I can't discuss that topic" in bot_response or
                 "Oops! I couldn't understand that" in bot_response or
                 "Apologies, I'm currently offline" in bot_response):
+            add_to_history(chat_id, 'model', bot_response)
+            
+        await update.message.reply_text(bot_response)
+    else:
+        logger.info(f"[{chat_id}] No response generated for message.")
+
+async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, you don't have permission to use this command.")
+        return
+    if not context.args:
+        await update.message.reply_text("Please provide a message to broadcast.")
+        return
+
+    message_to_send = " ".join(context.args)
+    sent_count = 0
+    failed_count = 0
+    
+    await update.message.reply_text(f"Broadcasting message to {len(known_users)} users...")
+
+    for user_chat_id in list(known_users):
+        try:
+            await context.bot.send_message(chat_id=user_chat_id, text=message_to_send)
+            sent_count += 1
+            time.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Failed to send broadcast to {user_chat_id}: {e}")
+            failed_count += 1
+            if "blocked" in str(e).lower() or "not found" in str(e).lower():
+                known_users.discard(user_chat_id)
+
+    await context.bot.send_message(
+        chat_id=BROADCAST_ADMIN_ID,
+        text=f"Broadcast complete!\nSent to: {sent_count}\nFailed: {failed_count}"
+    )
+
+async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global bot_status
+    chat_id = update.effective_chat.id
+    
+    if not update.effective_chat.type in ['group', 'supergroup']:
+        await update.message.reply_text("This command can only be used in a group chat.")
+        return
+
+    bot_status[chat_id] = True
+    await update.message.reply_text("Bot is now ON for this group.")
+    logger.info(f"[{chat_id}] Bot was turned ON by {update.effective_user.id}")
+
+async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global bot_status
+    chat_id = update.effective_chat.id
+    
+    if not update.effective_chat.type in ['group', 'supergroup']:
+        await update.message.reply_text("This command can only be used in a group chat.")
+        return
+
+    bot_status[chat_id] = False
+    await update.message.reply_text("Bot is now OFF for this group. I will not respond until turned ON.")
+    logger.info(f"[{chat_id}] Bot was turned OFF by {update.effective_user.id}")
+
+app = Flask(__name__)
+application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+application.add_handler(CommandHandler("start", start_command))
+application.add_handler(CommandHandler("broadcast", broadcast_message))
+application.add_handler(CommandHandler("on", on_command))
+application.add_handler(CommandHandler("off", off_command))
+application.add_handler(CommandHandler("ban", ban_user))
+application.add_handler(CommandHandler("kick", kick_user))
+application.add_handler(CommandHandler("mute", mute_user))
+application.add_handler(CommandHandler("stats", stats_command))
+application.add_handler(CommandHandler("adminstats", admin_stats_command))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+@app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
+async def webhook_handler():
+    if request.method == "POST":
+        update = Update.de_json(request.json, application.bot)
+        async with application:
+            await application.process_update(update)
+    return "ok"
