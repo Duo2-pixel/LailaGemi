@@ -2,6 +2,7 @@ python-telegram-bot==20.8
 google-generativeai==0.7.0
 python-dotenv==1.0.1
 Flask==3.0.3
+gunicorn==22.0.0
 gspread==6.1.1
 oauth2client==4.1.2
 psutil==5.9.8
