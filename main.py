@@ -549,7 +549,7 @@ application.add_handler(CommandHandler("ban", ban_user))
 application.add_handler(CommandHandler("kick", kick_user))
 application.add_handler(CommandHandler("mute", mute_user))
 application.add_handler(CommandHandler("stats", stats_command))
-application.add_handler(CommandHandler("adminstats", admin_stats_command)) # New Admin Command
+application.add_handler(CommandHandler("adminstats", admin_stats_command))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 @app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
