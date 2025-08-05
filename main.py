@@ -9,7 +9,6 @@ import time
 import json
 import random
 import re
-from flask import Flask, request
 import gspread
 import psutil
 from datetime import datetime
@@ -17,9 +16,6 @@ import asyncio
 
 # Load environment variables from .env file
 load_dotenv()
-
-# --- Flask App Global Variable ---
-app = Flask(__name__)
 
 # --- Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -497,45 +493,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(response_text)
 
 
-# THIS IS THE KEY FIX: The application object is initialized once at the global level.
-# And we use it in the webhook handler. The `gevent` worker will handle concurrency correctly.
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start_command))
-application.add_handler(CommandHandler("stats", stats_command))
-application.add_handler(CommandHandler("adminstats", admin_stats_command))
-application.add_handler(CommandHandler("ban", ban_user))
-application.add_handler(CommandHandler("kick", kick_user))
-application.add_handler(CommandHandler("mute", mute_user))
-application.add_handler(CommandHandler("on", on_command))
-application.add_handler(CommandHandler("off", off_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+def main() -> None:
+    """Start the bot."""
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables.")
 
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("adminstats", admin_stats_command))
+    application.add_handler(CommandHandler("ban", ban_user))
+    application.add_handler(CommandHandler("kick", kick_user))
+    application.add_handler(CommandHandler("mute", mute_user))
+    application.add_handler(CommandHandler("on", on_command))
+    application.add_handler(CommandHandler("off", off_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-@app.route('/')
-def index():
-    return 'Bot is up and running!', 200
+    # We will run the bot in webhook mode using the library's built-in server.
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", "8000")),
+        url_path=TELEGRAM_BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+    )
 
-@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-async def webhook_handler():
-    if request.method == "POST":
-        try:
-            update = Update.de_json(request.get_json(force=True), application.bot)
-            await application.process_update(update)
-        except Exception as e:
-            logger.error(f"Error handling webhook update: {e}")
-    return 'ok'
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-
-    # set webhook for testing and then run locally
-    async def set_webhook_and_run():
-        if WEBHOOK_URL and TELEGRAM_BOT_TOKEN:
-            try:
-                await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}")
-                logger.info(f"Webhook set to {WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}")
-            except Exception as e:
-                logger.error(f"Failed to set webhook: {e}")
-    
-    asyncio.run(set_webhook_and_run())
-    app.run(host='0.0.0.0', port=port)
+    main()
