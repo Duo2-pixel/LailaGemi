@@ -63,7 +63,7 @@ Important: Do not generate overly long responses like an essay. Be crisp and adj
 """
 
 # --- Chat History Management (in-memory) ---
-chat_histories = defaultdict(list) 
+chat_histories = defaultdict(list)
 MAX_HISTORY_LENGTH = 20
 
 def add_to_history(chat_id, role, text):
@@ -83,7 +83,7 @@ active_api_key = GEMINI_API_KEYS[current_api_key_index]
 key_cooldown_until = defaultdict(lambda: 0)
 
 genai.configure(api_key=active_api_key)
-model_name = 'gemini-2.5-flash-lite' 
+model_name = 'gemini-2.5-flash-lite'
 model = genai.GenerativeModel(model_name, system_instruction=LAILA_SYSTEM_PROMPT)
 
 # --- Fallback Responses (Static Memory) ---
@@ -464,100 +464,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
             if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
                 await update.message.reply_text(random.choice(FUNNY_RESPONSES))
-                return 
-        
-        if is_reply_to_bot or is_mentioned:
+                return
             should_respond_with_ai = True
         
-    add_to_history(chat_id, 'user', user_message)
-    logger.info(f"[{chat_id}] Received message from {user_name}: {user_message}")
+    elif chat_type == 'private':
+        should_respond_with_ai = True
 
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-    bot_response = await get_bot_response(user_message, chat_id, context.bot.username, should_respond_with_ai, update)
+    if should_respond_with_ai:
+        add_to_history(chat_id, "user", user_message)
+        
+        response_text = await get_bot_response(user_message, chat_id, context.bot.name, should_respond_with_ai, update)
+        
+        if response_text:
+            add_to_history(chat_id, "model", response_text)
+            await update.message.reply_text(response_text)
+
+
+def main() -> None:
+    """Start the bot using webhooks."""
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables.")
+
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    if not WEBHOOK_URL:
+        raise ValueError("WEBHOOK_URL not found in environment variables.")
+
+    # Create the Application and pass it your bot's token.
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    if bot_response:
-        if not ("Apologies, I can't discuss that topic" in bot_response or
-                "Oops! I couldn't understand that" in bot_response or
-                "Apologies, I'm currently offline" in bot_response):
-            add_to_history(chat_id, 'model', bot_response)
-            
-        await update.message.reply_text(bot_response)
-    else:
-        logger.info(f"[{chat_id}] No response generated for message.")
+    # We need a dummy Flask app instance for gunicorn to find
+    global app
+    app = Flask(__name__)
 
-async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    
-    if user_id != BROADCAST_ADMIN_ID:
-        await update.message.reply_text("Sorry, you don't have permission to use this command.")
-        return
-    if not context.args:
-        await update.message.reply_text("Please provide a message to broadcast.")
-        return
+    @app.route('/')
+    def index():
+        return 'Bot is up and running!', 200
 
-    message_to_send = " ".join(context.args)
-    sent_count = 0
-    failed_count = 0
-    
-    await update.message.reply_text(f"Broadcasting message to {len(known_users)} users...")
+    # Set up the bot handlers and webhook
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("adminstats", admin_stats_command))
+    application.add_handler(CommandHandler("ban", ban_user))
+    application.add_handler(CommandHandler("kick", kick_user))
+    application.add_handler(CommandHandler("mute", mute_user))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    for user_chat_id in list(known_users):
-        try:
-            await context.bot.send_message(chat_id=user_chat_id, text=message_to_send)
-            sent_count += 1
-            time.sleep(0.1)
-        except Exception as e:
-            logger.error(f"Failed to send broadcast to {user_chat_id}: {e}")
-            failed_count += 1
-            if "blocked" in str(e).lower() or "not found" in str(e).lower():
-                known_users.discard(user_chat_id)
-
-    await context.bot.send_message(
-        chat_id=BROADCAST_ADMIN_ID,
-        text=f"Broadcast complete!\nSent to: {sent_count}\nFailed: {failed_count}"
+    # Add the webhook handler
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+        url_path=TELEGRAM_BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}{TELEGRAM_BOT_TOKEN}"
     )
 
-async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global bot_status
-    chat_id = update.effective_chat.id
-    
-    if not update.effective_chat.type in ['group', 'supergroup']:
-        await update.message.reply_text("This command can only be used in a group chat.")
-        return
-
-    bot_status[chat_id] = True
-    await update.message.reply_text("Bot is now ON for this group.")
-    logger.info(f"[{chat_id}] Bot was turned ON by {update.effective_user.id}")
-
-async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global bot_status
-    chat_id = update.effective_chat.id
-    
-    if not update.effective_chat.type in ['group', 'supergroup']:
-        await update.message.reply_text("This command can only be used in a group chat.")
-        return
-
-    bot_status[chat_id] = False
-    await update.message.reply_text("Bot is now OFF for this group. I will not respond until turned ON.")
-    logger.info(f"[{chat_id}] Bot was turned OFF by {update.effective_user.id}")
-
-app = Flask(__name__)
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start_command))
-application.add_handler(CommandHandler("broadcast", broadcast_message))
-application.add_handler(CommandHandler("on", on_command))
-application.add_handler(CommandHandler("off", off_command))
-application.add_handler(CommandHandler("ban", ban_user))
-application.add_handler(CommandHandler("kick", kick_user))
-application.add_handler(CommandHandler("mute", mute_user))
-application.add_handler(CommandHandler("stats", stats_command))
-application.add_handler(CommandHandler("adminstats", admin_stats_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-@app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
-async def webhook_handler():
-    if request.method == "POST":
-        update = Update.de_json(request.json, application.bot)
-        async with application:
-            await application.process_update(update)
-    return "ok"
+if __name__ == "__main__":
+    main()
