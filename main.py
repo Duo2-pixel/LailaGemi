@@ -498,15 +498,14 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         sheet, _ = get_google_sheet_connection()
         if not sheet or not sheet.title:
             raise Exception("Could not get sheet title")
-    except Exception:
-        sheets_connection_status = "❌ Failed"
+    except Exception as e:
+        sheets_connection_status = f"❌ Failed: {e}"
 
     env_vars_status = "✅ All set"
     if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEYS[0], BROADCAST_ADMIN_ID, WEBHOOK_URL]):
         env_vars_status = "⚠️ Missing key variables"
 
     render_status = "✅ Active" if os.getenv("RENDER_EXTERNAL_URL") else "⚠️ Local/Unknown"
-
 
     # --- API Key Status ---
     api_key_status_text = ""
@@ -568,21 +567,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_type = update.effective_chat.type
     should_respond_with_ai = False
 
-    # --- New logic for creator defense and praise ---
-    creator_keywords_negative = ["adhyan is bad", "adhyan bekar hai", "adhyan ghatiya hai", "adhyan useless"]
-    creator_keywords_positive = ["adhyan is good", "adhyan kaise hai", "adhyan kon hai", "adhyan ke bare me batao", "tumhare creator kaise hai", "tumhe kisne banaya"]
+    # --- New logic for creator defense, praise, and direct name drop ---
+    creator_keywords_negative = ["adhyan is bad", "adhyan bekar hai", "adhyan ghatiya hai", "adhyan useless", "adhayan ne kya banaya"]
+    creator_keywords_positive = ["adhyan is good", "adhyan kaise hai", "adhyan ke bare me batao", "tumhare creator kaise hai", "tumhe kisne banaya"]
+    creator_name_keywords = ["creator kon", "who created", "creator name", "tumhe kisne banaya"]
 
-    if any(keyword in user_message_lower for keyword in creator_keywords_negative):
+    # Check for direct name question first
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_name_keywords):
+        await update.message.reply_text("My Creator is @AdhyanXlive.")
+        return
+
+    # Check for praise or defense after the direct question
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_keywords_negative):
         await update.message.reply_text("Aap aise kyu bol rahe hain? Adhyan ne mujhe itni mehnat se banaya hai. Woh bohot acche aur mehanti hain. 😊")
         return
     
-    if any(keyword in user_message_lower for keyword in creator_keywords_positive):
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_keywords_positive):
         await update.message.reply_text("Mere creator Adhyan bohot acche hain. Unhone mujhe itni mehnat se banaya hai taaki main sabki madad kar sakun. Woh bohot smart aur kind hain. 😍")
+        return
+
+    # --- Date of Birth logic ---
+    dob_keywords = ["date of birth", "janam kab hua", "birthday", "birth date", "kab paida hui"]
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in dob_keywords):
+        await update.message.reply_text("My date of birth is 1st August 2025.")
         return
     
     # --- Existing stats and humor checks (modified for less frequency) ---
     stats_keywords = ["your stats", "laila stats", "show stats", "bot stats", "stats"]
-    if any(keyword in user_message_lower for keyword in stats_keywords):
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in stats_keywords):
         await stats_command(update, context)
         return
 
