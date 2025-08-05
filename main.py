@@ -13,7 +13,6 @@ from flask import Flask, request
 import gspread
 import psutil
 from datetime import datetime
-import asyncio
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,7 +36,6 @@ try:
 except (ValueError, TypeError):
     BROADCAST_ADMIN_ID = 0
     logging.error("BROADCAST_ADMIN_ID is missing or not a valid number. Broadcast functionality will be disabled.")
-
 
 # --- Global Stats Variables ---
 start_time = datetime.now()
@@ -444,27 +442,7 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(response_text, parse_mode='Markdown')
     logger.info(f"[{update.effective_chat.id}] /adminstats command used by admin.")
 
-def setup_bot():
-    """Setup the bot application with all handlers."""
-    if not TELEGRAM_BOT_TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables.")
-
-    # CORRECTED LINE: Removed http_version and http_connections
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # Set up the bot handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("adminstats", admin_stats_command))
-    application.add_handler(CommandHandler("ban", ban_user))
-    application.add_handler(CommandHandler("kick", kick_user))
-    application.add_handler(CommandHandler("mute", mute_user))
-    application.add_handler(CommandHandler("on", on_command))
-    application.add_handler(CommandHandler("off", off_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    return application
-
+# --- HANDLERS ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global total_messages_processed
     user_message = update.effective_message.text
@@ -515,17 +493,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             add_to_history(chat_id, "model", response_text)
             await update.message.reply_text(response_text)
 
+# --- WEBHOOK SETUP ---
+def setup_bot_for_webhook():
+    """Setup the bot application with all handlers."""
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables.")
 
-# Get a global application instance
-application = setup_bot()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-# Set the webhook URL on bot startup
-if WEBHOOK_URL and TELEGRAM_BOT_TOKEN:
-    try:
-        asyncio.run(application.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"))
-        logger.info(f"Webhook set to {WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}")
-    except Exception as e:
-        logger.error(f"Failed to set webhook: {e}")
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("adminstats", admin_stats_command))
+    application.add_handler(CommandHandler("ban", ban_user))
+    application.add_handler(CommandHandler("kick", kick_user))
+    application.add_handler(CommandHandler("mute", mute_user))
+    application.add_handler(CommandHandler("on", on_command))
+    application.add_handler(CommandHandler("off", off_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    return application
 
 @app.route('/')
 def index():
@@ -537,6 +523,8 @@ async def webhook_handler():
     """Handle incoming webhook updates from Telegram."""
     if request.method == "POST":
         try:
+            # THIS IS THE KEY FIX: Initialize the application object inside the handler.
+            application = setup_bot_for_webhook()
             update = Update.de_json(request.get_json(force=True), application.bot)
             await application.process_update(update)
         except Exception as e:
