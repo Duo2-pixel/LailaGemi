@@ -17,6 +17,10 @@ from datetime import datetime
 # Load environment variables from .env file
 load_dotenv()
 
+# --- Flask App Global Variable ---
+# Gunicorn is looking for this 'app' variable, so it must be global
+app = Flask(__name__)
+
 # --- Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEYS = [
@@ -333,6 +337,19 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         await update.message.reply_text(f"Could not mute user: {e}")
         logger.error(f"[{chat_id}] Error muting user {target_user.id}: {e}")
+        
+async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    bot_status[chat_id] = True
+    await update.message.reply_text("Laila is now ON.")
+
+async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if update.effective_user.id == BROADCAST_ADMIN_ID or await is_admin(context.bot, chat_id, update.effective_user.id):
+        bot_status[chat_id] = False
+        await update.message.reply_text("Laila is now OFF.")
+    else:
+        await update.message.reply_text("Sorry, only admins can turn me off.")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
@@ -480,7 +497,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(response_text)
 
 
-def main() -> None:
+def run_bot() -> None:
     """Start the bot using webhooks."""
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     if not TELEGRAM_BOT_TOKEN:
@@ -492,10 +509,6 @@ def main() -> None:
 
     # Create the Application and pass it your bot's token.
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # We need a dummy Flask app instance for gunicorn to find
-    global app
-    app = Flask(__name__)
 
     @app.route('/')
     def index():
@@ -508,6 +521,8 @@ def main() -> None:
     application.add_handler(CommandHandler("ban", ban_user))
     application.add_handler(CommandHandler("kick", kick_user))
     application.add_handler(CommandHandler("mute", mute_user))
+    application.add_handler(CommandHandler("on", on_command))
+    application.add_handler(CommandHandler("off", off_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Add the webhook handler
@@ -519,4 +534,4 @@ def main() -> None:
     )
 
 if __name__ == "__main__":
-    main()
+    run_bot()
