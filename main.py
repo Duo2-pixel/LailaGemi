@@ -9,7 +9,7 @@ import time
 import json
 import random
 import re
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import gspread
 import psutil
 from datetime import datetime
@@ -29,6 +29,7 @@ GEMINI_API_KEYS = [
     os.getenv("GEMINI_API_KEY_4"),
     os.getenv("GEMINI_API_KEY_5"),
 ]
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 try:
     BROADCAST_ADMIN_ID = int(os.getenv("BROADCAST_ADMIN_ID"))
@@ -496,16 +497,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(response_text)
 
 
-def run_bot() -> None:
-    """Start the bot using webhooks."""
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+def setup_bot():
+    """Setup the bot application with all handlers."""
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables.")
 
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-    if not WEBHOOK_URL:
-        raise ValueError("WEBHOOK_URL not found in environment variables.")
-        
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Set up the bot handlers
@@ -519,29 +515,36 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("off", off_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Run the bot with webhooks
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-        url_path=TELEGRAM_BOT_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}{TELEGRAM_BOT_TOKEN}"
-    )
+    return application
 
+# Get a global application instance
+application = setup_bot()
+
+# Set the webhook URL on bot startup
+if WEBHOOK_URL and TELEGRAM_BOT_TOKEN:
+    try:
+        application.bot.set_webhook(url=f"{WEBHOOK_URL}{TELEGRAM_BOT_TOKEN}")
+        logger.info(f"Webhook set to {WEBHOOK_URL}{TELEGRAM_BOT_TOKEN}")
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}")
 
 @app.route('/')
 def index():
+    """Render health check to avoid 404 errors."""
     return 'Bot is up and running!', 200
 
-@app.route(f"/{os.getenv('TELEGRAM_BOT_TOKEN')}", methods=["POST"])
+@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 async def webhook_handler():
     """Handle incoming webhook updates from Telegram."""
-    try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        await application.process_update(update)
-    except Exception as e:
-        logger.error(f"Error handling webhook update: {e}")
+    if request.method == "POST":
+        try:
+            update = Update.de_json(request.get_json(force=True), application.bot)
+            await application.process_update(update)
+        except Exception as e:
+            logger.error(f"Error handling webhook update: {e}")
     return 'ok'
 
-
 if __name__ == "__main__":
-    run_bot()
+    # Is block ko sirf local testing ke liye use karein
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host='0.0.0.0', port=port)
