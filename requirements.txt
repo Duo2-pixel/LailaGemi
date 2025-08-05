@@ -1,9 +1,5 @@
-Flask[async]>=3.0.0
 python-telegram-bot>=22.3
-gunicorn>=23.0.0
 python-dotenv>=1.0.0
 google-generativeai>=0.5.0
 gspread>=6.2.1
 psutil>=7.0.0
-uvicorn>=0.30.1
-gevent>=23.9.1
