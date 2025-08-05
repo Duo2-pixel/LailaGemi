@@ -18,7 +18,6 @@ from datetime import datetime
 load_dotenv()
 
 # --- Flask App Global Variable ---
-# Gunicorn is looking for this 'app' variable, so it must be global
 app = Flask(__name__)
 
 # --- Environment Variables ---
@@ -506,15 +505,10 @@ def run_bot() -> None:
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
     if not WEBHOOK_URL:
         raise ValueError("WEBHOOK_URL not found in environment variables.")
-
-    # Create the Application and pass it your bot's token.
+        
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    @app.route('/')
-    def index():
-        return 'Bot is up and running!', 200
-
-    # Set up the bot handlers and webhook
+    # Set up the bot handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("adminstats", admin_stats_command))
@@ -524,14 +518,30 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("on", on_command))
     application.add_handler(CommandHandler("off", off_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Add the webhook handler
+    
+    # Run the bot with webhooks
     application.run_webhook(
         listen="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
         url_path=TELEGRAM_BOT_TOKEN,
         webhook_url=f"{WEBHOOK_URL}{TELEGRAM_BOT_TOKEN}"
     )
+
+
+@app.route('/')
+def index():
+    return 'Bot is up and running!', 200
+
+@app.route(f"/{os.getenv('TELEGRAM_BOT_TOKEN')}", methods=["POST"])
+async def webhook_handler():
+    """Handle incoming webhook updates from Telegram."""
+    try:
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        await application.process_update(update)
+    except Exception as e:
+        logger.error(f"Error handling webhook update: {e}")
+    return 'ok'
+
 
 if __name__ == "__main__":
     run_bot()
