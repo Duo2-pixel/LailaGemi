@@ -449,8 +449,8 @@ def setup_bot():
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables.")
 
-    # We now pass the flask app to the application builder
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).http_version("1.1").http_connections(5).build()
+    # **THEEK KIYA GAYA LINE:** `http_version` aur `http_connections` ko hata diya gaya hai.
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Set up the bot handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -465,6 +465,57 @@ def setup_bot():
     
     return application
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global total_messages_processed
+    user_message = update.effective_message.text
+    user_name = update.effective_user.first_name
+    chat_id = update.effective_chat.id
+    known_users.add(chat_id)
+    user_message_lower = user_message.lower()
+    total_messages_processed += 1
+
+    if not bot_status[chat_id]:
+        logger.info(f"[{chat_id}] Bot is disabled. Ignoring message from {user_name}.")
+        return
+
+    chat_type = update.effective_chat.type
+    should_respond_with_ai = False
+    
+    stats_keywords = ["your stats", "laila stats", "show stats", "bot stats", "stats"]
+    if any(keyword in user_message_lower for keyword in stats_keywords):
+        await stats_command(update, context)
+        return
+
+    if chat_type != 'private':
+        bot_username = context.bot.name.lower()
+        is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot
+        is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
+        
+        if is_mentioned:
+            if check_for_owner_question(user_message):
+                await update.message.reply_text("My creator is @AdhyanXlive")
+                return
+        
+            HUMOR_KEYWORDS = ["lol", "haha", "😂", "🤣🤣", "🤣🤣🤣"]
+            FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
+            if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
+                await update.message.reply_text(random.choice(FUNNY_RESPONSES))
+                return
+            should_respond_with_ai = True
+        
+    elif chat_type == 'private':
+        should_respond_with_ai = True
+
+    if should_respond_with_ai:
+        add_to_history(chat_id, "user", user_message)
+        
+        response_text = await get_bot_response(user_message, chat_id, context.bot.name, should_respond_with_ai, update)
+        
+        if response_text:
+            add_to_history(chat_id, "model", response_text)
+            await update.message.reply_text(response_text)
+
+
 # Get a global application instance
 application = setup_bot()
 
@@ -476,7 +527,6 @@ if WEBHOOK_URL and TELEGRAM_BOT_TOKEN:
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
 
-
 @app.route('/')
 def index():
     """Render health check to avoid 404 errors."""
@@ -487,7 +537,6 @@ async def webhook_handler():
     """Handle incoming webhook updates from Telegram."""
     if request.method == "POST":
         try:
-            # Pass the received update to the bot application
             update = Update.de_json(request.get_json(force=True), application.bot)
             await application.process_update(update)
         except Exception as e:
@@ -495,5 +544,6 @@ async def webhook_handler():
     return 'ok'
 
 if __name__ == "__main__":
+    # Is block ko sirf local testing ke liye use karein
     port = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=port)
