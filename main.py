@@ -449,7 +449,7 @@ def setup_bot():
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables.")
 
-    # **THEEK KIYA GAYA LINE:** `http_version` aur `http_connections` ko hata diya gaya hai.
+    # CORRECTED LINE: Removed http_version and http_connections
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Set up the bot handlers
