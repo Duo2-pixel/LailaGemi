@@ -444,6 +444,7 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(response_text, parse_mode='Markdown')
     logger.info(f"[{update.effective_chat.id}] /adminstats command used by admin.")
 
+
 # --- HANDLERS ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global total_messages_processed
@@ -495,9 +496,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             add_to_history(chat_id, "model", response_text)
             await update.message.reply_text(response_text)
 
-# --- WEBHOOK SETUP ---
+
 # THIS IS THE KEY FIX: The application object is initialized once at the global level.
-# This prevents the `Application was not initialized` error.
+# And we use it in the webhook handler. The `gevent` worker will handle concurrency correctly.
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CommandHandler("stats", stats_command))
@@ -512,12 +513,10 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 
 @app.route('/')
 def index():
-    """Render health check to avoid 404 errors."""
     return 'Bot is up and running!', 200
 
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 async def webhook_handler():
-    """Handle incoming webhook updates from Telegram."""
     if request.method == "POST":
         try:
             update = Update.de_json(request.get_json(force=True), application.bot)
@@ -527,6 +526,16 @@ async def webhook_handler():
     return 'ok'
 
 if __name__ == "__main__":
-    # Is block ko sirf local testing ke liye use karein
     port = int(os.environ.get("PORT", 8000))
+
+    # set webhook for testing and then run locally
+    async def set_webhook_and_run():
+        if WEBHOOK_URL and TELEGRAM_BOT_TOKEN:
+            try:
+                await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}")
+                logger.info(f"Webhook set to {WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}")
+            except Exception as e:
+                logger.error(f"Failed to set webhook: {e}")
+    
+    asyncio.run(set_webhook_and_run())
     app.run(host='0.0.0.0', port=port)
