@@ -544,6 +544,21 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(response_text, parse_mode='Markdown')
     logger.info(f"[{update.effective_chat.id}] /adminstats command used by admin.")
 
+# --- AI check to see if a message is directed at the bot ---
+async def is_message_for_laila(user_message: str) -> bool:
+    prompt = f"Given the user message: '{user_message}', is it a question or command directed at an AI assistant? Answer only 'Yes' or 'No'."
+    try:
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.1,  # Low temperature for a direct answer
+                max_output_tokens=10
+            )
+        )
+        return "yes" in response.text.lower()
+    except Exception as e:
+        logger.error(f"Error checking if message is for Laila: {e}")
+        return False
 
 # --- HANDLERS ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -601,25 +616,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if chat_type != 'private':
         bot_username = context.bot.name.lower()
         is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot
-        is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
+        is_mentioned_or_named = (
+            re.search(r'\b(laila|' + re.escape(bot_username) + r')\b', user_message_lower) or
+            user_message_lower.startswith(('laila', '@' + bot_username))
+        )
         
-        if is_mentioned:
-            HUMOR_KEYWORDS = ["lol", "haha", "😂", "🤣🤣", "🤣🤣🤣"]
-            FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
-            
-            # Respond to humor keywords with low probability
-            if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS) and random.random() < 0.1:
-                await update.message.reply_text(random.choice(FUNNY_RESPONSES))
-                return
-
+        if is_reply_to_bot or is_mentioned_or_named:
             should_respond_with_ai = True
-        
+        else:
+            # Use AI to understand intent only if not directly addressed
+            if await is_message_for_laila(user_message):
+                should_respond_with_ai = True
+
     elif chat_type == 'private':
         should_respond_with_ai = True
 
     if should_respond_with_ai:
-        add_to_history(chat_id, "user", user_message)
+        HUMOR_KEYWORDS = ["lol", "haha", "😂", "🤣🤣", "🤣🤣🤣"]
+        FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
         
+        # Respond to humor keywords with low probability
+        if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in HUMOR_KEYWORDS) and random.random() < 0.1:
+            await update.message.reply_text(random.choice(FUNNY_RESPONSES))
+            return
+        
+        add_to_history(chat_id, "user", user_message)
         response_text = await get_bot_response(user_message, chat_id, context.bot.name, should_respond_with_ai, update)
         
         if response_text:
