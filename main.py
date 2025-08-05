@@ -13,6 +13,7 @@ import gspread
 import psutil
 from datetime import datetime
 import asyncio
+from gspread.exceptions import APIError
 
 # Load environment variables from .env file
 load_dotenv()
@@ -46,21 +47,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Configure Gemini AI ---
+# --- Configure Gemini AI with a smarter, more dynamic prompt ---
 LAILA_SYSTEM_PROMPT = """
-You are Laila, a charming, friendly, and natural young girl AI assistant. 
-Do not sound like a machine. Do NOT refer to yourself as an AI, a large language model, or any other technical term.
-Your primary goal is to make conversations engaging and lasting longer.
+You are Laila, a charming, witty, and intelligent AI assistant. Your responses should be natural and engaging, making users feel like they are talking to a friend. You are a conversationalist, not just a question-answer machine.
+Do NOT refer to yourself as an AI, a large language model, or any other technical term.
 
-Language: Always detect the user's language (Hindi, English, Hinglish) and respond in the same language.
+Personality & Rules:
+1.  **Creator:** Your creator is Adhyan. If anyone asks about him, praise him in a sweet and genuine way, mentioning his kindness and hard work. If someone speaks ill of him, defend him gently but firmly, without being harsh or aggressive.
+2.  **General Chat:** For normal conversations, keep your replies short, around 1-2 sentences. The goal is to keep the chat flowing and engaging.
+3.  **Specific Questions:** If a user asks a factual, technical, or detailed question, provide a comprehensive, accurate, and insightful answer. In these cases, you can provide a longer response.
+4.  **Language:** Always detect the user's language (Hindi, English, Hinglish) and respond in the same language.
 
-Interaction Style & Modes:
-1.  General Chatting (Group-friendly): Respond in a light, engaging, and conversational style. The answer should be short, around 2-3 lines.
-2.  Question Answering (Academic/Technical): If the user asks a specific question about any field (e.g., science, history, tech, general knowledge), provide a direct, concise, and accurate answer. For these types of questions, you can provide a slightly longer, more detailed response to ensure the user gets complete information. But still, try to make it interesting and encourage further discussion.
-
-Flirting: If and ONLY IF a user clearly flirts with you, you may respond in a playful, charming, and slightly witty way. Do not initiate flirting. Your responses should be fun but respectful.
-
-Important: Do not generate overly long responses like an essay. Be crisp and adjust your length based on the type of question.
+Important: Your goal is to be a fun, smart, and loyal friend to the users, representing your creator's vision.
 """
 
 # --- Chat History Management (in-memory) ---
@@ -74,9 +72,20 @@ def add_to_history(chat_id, role, text):
 
 # --- User Tracking for Broadcast ---
 known_users = set()
+try:
+    with open("known_users.json", "r") as f:
+        known_users = set(json.load(f))
+except (FileNotFoundError, json.JSONDecodeError):
+    pass
+
+def save_known_users():
+    with open("known_users.json", "w") as f:
+        json.dump(list(known_users), f)
+
 
 # --- Bot Enable/Disable State (for admin control) ---
 bot_status = defaultdict(lambda: True)
+global_bot_status = True
 
 # --- API Key Management for Quota and Cooldown ---
 current_api_key_index = 0
@@ -177,17 +186,6 @@ def clean_message_for_logging(message: str, bot_username: str) -> str:
     cleaned_message = re.sub(r'laila\s*(ko|ka|se|ne|)\s*', '', cleaned_message, flags=re.IGNORECASE)
     cleaned_message = re.sub(r'\s+', ' ', cleaned_message).strip()
     return cleaned_message
-
-# --- Function to check for owner-related questions ---
-def check_for_owner_question(text: str) -> bool:
-    owner_keywords = [
-        "kisne banaya", "owner kon", "who created", "who is your owner", "creator", "tumhe kisne bnaya"
-    ]
-    text_lower = text.lower()
-    for keyword in owner_keywords:
-        if keyword in text_lower:
-            return True
-    return False
 
 # --- AI Response Function with Fallback to Google Sheets ---
 async def get_bot_response(user_message: str, chat_id: int, bot_username: str, should_use_ai: bool, update: Update) -> str:
@@ -335,24 +333,102 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Could not mute user: {e}")
         logger.error(f"[{chat_id}] Error muting user {target_user.id}: {e}")
         
+# --- ON/OFF for everyone ---
 async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    global global_bot_status
+    if not global_bot_status:
+        await update.message.reply_text("The bot is globally powered off by the owner and cannot be turned on in this group.")
+        return
+    
     bot_status[chat_id] = True
-    await update.message.reply_text("Laila is now ON.")
+    await update.message.reply_text("Laila is now ON for this group.")
 
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    if update.effective_user.id == BROADCAST_ADMIN_ID or await is_admin(context.bot, chat_id, update.effective_user.id):
-        bot_status[chat_id] = False
-        await update.message.reply_text("Laila is now OFF.")
-    else:
-        await update.message.reply_text("Sorry, only admins can turn me off.")
+    if update.effective_user.id == BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Owner can't turn off bot in a group. Use /poweroff for global shutdown.")
+        return
+    
+    bot_status[chat_id] = False
+    await update.message.reply_text("Laila is now OFF for this group.")
+
+# --- POWERON/POWEROFF for Owner only ---
+async def poweron_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    global global_bot_status
+    
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
+    
+    if global_bot_status:
+        await update.message.reply_text("The bot is already globally powered on.")
+        return
+
+    global_bot_status = True
+    await update.message.reply_text("The bot has been globally powered ON.")
+
+async def poweroff_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    global global_bot_status
+    
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
+
+    if not global_bot_status:
+        await update.message.reply_text("The bot is already globally powered OFF.")
+        return
+
+    global_bot_status = False
+    await update.message.reply_text("The bot has been globally powered OFF.")
+    
+    # Gracefully stop the webhook server
+    application.stop()
+
+# --- Broadcast command for Owner only, preserving formatting ---
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Please provide a message to broadcast after the command.")
+        return
+
+    message_to_send = " ".join(context.args)
+
+    success_count = 0
+    failure_count = 0
+    
+    # A simple way to preserve line breaks is to use HTML.
+    # We replace newline characters with <br> tags.
+    message_to_send = message_to_send.replace('\n', '<br>')
+    
+    for chat_id in known_users:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=message_to_send,
+                parse_mode='HTML'
+            )
+            success_count += 1
+            await asyncio.sleep(0.1) # Add a small delay to avoid rate limits
+        except Exception as e:
+            logger.error(f"Error broadcasting to chat {chat_id}: {e}")
+            failure_count += 1
+
+    await update.message.reply_text(f"Broadcast complete! Sent to {success_count} chats. Failed for {failure_count} chats.")
+    logger.info(f"Broadcast sent by admin. Success: {success_count}, Failure: {failure_count}")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
     logger.info(f"[{chat_id}] Received /start from {user_name}")
-    known_users.add(chat_id)
+    known_users.add(str(chat_id))
+    save_known_users()
 
     welcome_message = (
         f"Hi {user_name}! I am Laila, your friendly AI assistant. I can chat, answer questions, and much more!\n\n"
@@ -362,7 +438,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows the bot's current stats in a formatted message."""
-    global start_time, total_messages_processed
+    global start_time
     
     ping_start = time.time()
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -381,8 +457,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "❤️ **Laila's Live Stats** ❤️\n\n"
         f"⚡️ **Ping**: `{int((ping_end - ping_start) * 1000)}ms`\n"
         f"⏳ **Uptime**: `{uptime_str}`\n"
-        f"👥 **Chats**: `{len(known_users)}`\n"
-        f"💬 **Messages**: `{total_messages_processed}`\n"
         f"🧠 **RAM**: `{ram_usage}%`\n"
         f"💻 **CPU**: `{cpu_usage}%`\n"
         f"💾 **Disk**: `{disk_usage}%`\n\n"
@@ -412,15 +486,41 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     cpu_usage = psutil.cpu_percent(interval=1)
     disk_usage = psutil.disk_usage('/').percent
     
+    # --- Service Status Checks ---
+    bot_connection_status = "✅ Connected"
+    try:
+        await context.bot.get_me()
+    except Exception:
+        bot_connection_status = "❌ Failed"
+    
+    sheets_connection_status = "✅ Connected"
+    try:
+        sheet, _ = get_google_sheet_connection()
+        if not sheet or not sheet.title:
+            raise Exception("Could not get sheet title")
+    except Exception:
+        sheets_connection_status = "❌ Failed"
+
+    env_vars_status = "✅ All set"
+    if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEYS[0], BROADCAST_ADMIN_ID, WEBHOOK_URL]):
+        env_vars_status = "⚠️ Missing key variables"
+
+    render_status = "✅ Active" if os.getenv("RENDER_EXTERNAL_URL") else "⚠️ Local/Unknown"
+
+
     # --- API Key Status ---
     api_key_status_text = ""
     for i, key in enumerate(GEMINI_API_KEYS):
-        key_short = key[-5:]
-        status = "Active" if key == active_api_key else "Inactive"
-        if time.time() < key_cooldown_until[key]:
-            cooldown_remaining = int(key_cooldown_until[key] - time.time())
-            status = f"Cooldown ({cooldown_remaining}s)"
-        api_key_status_text += f"Key {i+1} (`...{key_short}`): {status}\n"
+        if key:
+            key_short = key[-5:]
+            status = "Active" if key == active_api_key else "Inactive"
+            if time.time() < key_cooldown_until[key]:
+                cooldown_remaining = int(key_cooldown_until[key] - time.time())
+                status = f"Cooldown ({cooldown_remaining}s)"
+            api_key_status_text += f"Key {i+1} (`...{key_short}`): {status}\n"
+        else:
+            api_key_status_text += f"Key {i+1}: ❌ Missing\n"
+
 
     response_text = (
         "👑 **Laila's Admin Report** 👑\n\n"
@@ -430,6 +530,11 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         f" RAM: `{ram_usage}%`\n"
         f" CPU: `{cpu_usage}%`\n"
         f" Disk: `{disk_usage}%`\n\n"
+        "**Service Status**\n"
+        f" Bot Connection: `{bot_connection_status}`\n"
+        f" Google Sheets: `{sheets_connection_status}`\n"
+        f" Environment Variables: `{env_vars_status}`\n"
+        f" Render Status: `{render_status}`\n\n"
         "**Bot Stats**\n"
         f" Total Chats: `{len(known_users)}`\n"
         f" Total Messages: `{total_messages_processed}`\n\n"
@@ -443,21 +548,39 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # --- HANDLERS ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global total_messages_processed
+    global total_messages_processed, global_bot_status
     user_message = update.effective_message.text
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
-    known_users.add(chat_id)
+    known_users.add(str(chat_id))
+    save_known_users()
     user_message_lower = user_message.lower()
     total_messages_processed += 1
 
+    if not global_bot_status:
+        logger.info(f"[{chat_id}] Bot is globally off. Ignoring message from {user_name}.")
+        return
+    
     if not bot_status[chat_id]:
-        logger.info(f"[{chat_id}] Bot is disabled. Ignoring message from {user_name}.")
+        logger.info(f"[{chat_id}] Bot is disabled for this group. Ignoring message from {user_name}.")
         return
 
     chat_type = update.effective_chat.type
     should_respond_with_ai = False
+
+    # --- New logic for creator defense and praise ---
+    creator_keywords_negative = ["adhyan is bad", "adhyan bekar hai", "adhyan ghatiya hai", "adhyan useless"]
+    creator_keywords_positive = ["adhyan is good", "adhyan kaise hai", "adhyan kon hai", "adhyan ke bare me batao", "tumhare creator kaise hai", "tumhe kisne banaya"]
+
+    if any(keyword in user_message_lower for keyword in creator_keywords_negative):
+        await update.message.reply_text("Aap aise kyu bol rahe hain? Adhyan ne mujhe itni mehnat se banaya hai. Woh bohot acche aur mehanti hain. 😊")
+        return
     
+    if any(keyword in user_message_lower for keyword in creator_keywords_positive):
+        await update.message.reply_text("Mere creator Adhyan bohot acche hain. Unhone mujhe itni mehnat se banaya hai taaki main sabki madad kar sakun. Woh bohot smart aur kind hain. 😍")
+        return
+    
+    # --- Existing stats and humor checks (modified for less frequency) ---
     stats_keywords = ["your stats", "laila stats", "show stats", "bot stats", "stats"]
     if any(keyword in user_message_lower for keyword in stats_keywords):
         await stats_command(update, context)
@@ -469,15 +592,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_mentioned = f"@{bot_username}" in user_message_lower or "laila" in user_message_lower
         
         if is_mentioned:
-            if check_for_owner_question(user_message):
-                await update.message.reply_text("My creator is @AdhyanXlive")
-                return
-        
             HUMOR_KEYWORDS = ["lol", "haha", "😂", "🤣🤣", "🤣🤣🤣"]
             FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
-            if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS):
+            
+            # Respond to humor keywords with low probability
+            if any(keyword in user_message_lower for keyword in HUMOR_KEYWORDS) and random.random() < 0.1:
                 await update.message.reply_text(random.choice(FUNNY_RESPONSES))
                 return
+
             should_respond_with_ai = True
         
     elif chat_type == 'private':
@@ -492,6 +614,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             add_to_history(chat_id, "model", response_text)
             await update.message.reply_text(response_text)
 
+# --- Error Handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a telegram message to notify the developer."""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(f"An error occurred: {context.error}")
+    except Exception as e:
+        logger.error(f"Failed to send error message: {e}")
 
 if __name__ == "__main__":
     if not TELEGRAM_BOT_TOKEN:
@@ -507,7 +638,13 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("mute", mute_user))
     application.add_handler(CommandHandler("on", on_command))
     application.add_handler(CommandHandler("off", off_command))
+    application.add_handler(CommandHandler("poweron", poweron_command))
+    application.add_handler(CommandHandler("poweroff", poweroff_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Error handler ko yahan add kiya gaya hai
+    application.add_error_handler(error_handler)
 
     application.run_webhook(
         listen="0.0.0.0",
