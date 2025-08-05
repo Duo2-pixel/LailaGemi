@@ -9,7 +9,7 @@ import time
 import json
 import random
 import re
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import gspread
 import psutil
 from datetime import datetime
@@ -522,11 +522,11 @@ def setup_bot():
 application = setup_bot()
 
 # Set the webhook URL on bot startup
-# Yeh code ab asyncio.run() se call kiya gaya hai, jo RuntimeWarning ko fix karta hai
 if WEBHOOK_URL and TELEGRAM_BOT_TOKEN:
     try:
-        asyncio.run(application.bot.set_webhook(url=f"{WEBHOOK_URL}{TELEGRAM_BOT_TOKEN}"))
-        logger.info(f"Webhook set to {WEBHOOK_URL}{TELEGRAM_BOT_TOKEN}")
+        # Corrected this line with a "/" to fix the Invalid webhook url error.
+        asyncio.run(application.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"))
+        logger.info(f"Webhook set to {WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}")
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
 
