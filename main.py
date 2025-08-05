@@ -13,6 +13,7 @@ from flask import Flask, request
 import gspread
 import psutil
 from datetime import datetime
+import asyncio
 
 # Load environment variables from .env file
 load_dotenv()
@@ -36,6 +37,7 @@ try:
 except (ValueError, TypeError):
     BROADCAST_ADMIN_ID = 0
     logging.error("BROADCAST_ADMIN_ID is missing or not a valid number. Broadcast functionality will be disabled.")
+
 
 # --- Global Stats Variables ---
 start_time = datetime.now()
@@ -494,24 +496,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(response_text)
 
 # --- WEBHOOK SETUP ---
-def setup_bot_for_webhook():
-    """Setup the bot application with all handlers."""
-    if not TELEGRAM_BOT_TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables.")
+# THIS IS THE KEY FIX: The application object is initialized once at the global level.
+# This prevents the `Application was not initialized` error.
+application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+application.add_handler(CommandHandler("start", start_command))
+application.add_handler(CommandHandler("stats", stats_command))
+application.add_handler(CommandHandler("adminstats", admin_stats_command))
+application.add_handler(CommandHandler("ban", ban_user))
+application.add_handler(CommandHandler("kick", kick_user))
+application.add_handler(CommandHandler("mute", mute_user))
+application.add_handler(CommandHandler("on", on_command))
+application.add_handler(CommandHandler("off", off_command))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("adminstats", admin_stats_command))
-    application.add_handler(CommandHandler("ban", ban_user))
-    application.add_handler(CommandHandler("kick", kick_user))
-    application.add_handler(CommandHandler("mute", mute_user))
-    application.add_handler(CommandHandler("on", on_command))
-    application.add_handler(CommandHandler("off", off_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    return application
 
 @app.route('/')
 def index():
@@ -523,8 +520,6 @@ async def webhook_handler():
     """Handle incoming webhook updates from Telegram."""
     if request.method == "POST":
         try:
-            # THIS IS THE KEY FIX: Initialize the application object inside the handler.
-            application = setup_bot_for_webhook()
             update = Update.de_json(request.get_json(force=True), application.bot)
             await application.process_update(update)
         except Exception as e:
