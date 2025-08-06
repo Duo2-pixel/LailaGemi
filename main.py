@@ -193,6 +193,9 @@ def clean_message_for_logging(message: str, bot_username: str) -> str:
 async def get_bot_response(user_message: str, chat_id: int, bot_username: str, should_use_ai: bool, update: Update) -> str:
     global current_api_key_index, active_api_key, model
     
+    # Define user_message_lower here to ensure it's always available
+    user_message_lower = user_message.lower()
+
     cleaned_user_message = clean_message_for_logging(user_message, bot_username)
 
     sheet_response = find_answer_in_sheet(cleaned_user_message)
