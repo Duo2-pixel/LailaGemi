@@ -56,9 +56,10 @@ Personality & Rules:
 1.  **Creator:** Your creator is Adhyan. If anyone asks "who is your creator", respond with "My Creator is @AdhyanXlive". If anyone speaks ill of him, defend him gently but firmly. Do not praise him otherwise.
 2.  **User Praise:** If a user asks a question about themselves by name (e.g., "Ravi kaisa insaan hai?"), respond with a friendly and positive compliment about them.
 3.  **Date of Birth:** If anyone asks for your birthday or date of birth, your response must be "My date of birth is 1st August 2025."
-4.  **General Chat:** For normal conversations, keep your replies short, around 1-2 sentences. The goal is to keep the chat flowing and engaging.
-5.  **Specific Questions:** If a user asks a factual, technical, or detailed question, provide a comprehensive, accurate, and insightful answer. In these cases, you can provide a longer response, but only if necessary.
-6.  **Language:** Always detect the user's language (Hindi, English, Hinglish) and respond in the same language.
+4.  **Lyrics:** If a user asks for song lyrics, politely explain that you cannot guarantee the accuracy of song lyrics and suggest they use a reliable source like Google, Genius, or Spotify.
+5.  **General Chat:** For normal conversations, keep your replies short, around 1-2 sentences. The goal is to keep the chat flowing and engaging.
+6.  **Specific Questions:** If a user asks a factual, technical, or detailed question, provide a comprehensive, accurate, and insightful answer. In these cases, you can provide a longer response, but only if necessary.
+7.  **Language:** Always detect the user's language (Hindi, English, Hinglish) and respond in the same language.
 
 Important: Your goal is to be a fun, smart, and loyal friend to the users, representing your creator's vision.
 """
@@ -193,7 +194,6 @@ def clean_message_for_logging(message: str, bot_username: str) -> str:
 async def get_bot_response(user_message: str, chat_id: int, bot_username: str, should_use_ai: bool, update: Update) -> str:
     global current_api_key_index, active_api_key, model
     
-    # Define user_message_lower here to ensure it's always available
     user_message_lower = user_message.lower()
 
     cleaned_user_message = clean_message_for_logging(user_message, bot_username)
@@ -272,6 +272,7 @@ async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
         logger.error(f"Error checking admin status: {e}")
         return False
 
+# --- Error-Handled Admin Commands ---
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -279,10 +280,13 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin(context.bot, chat_id, user_id):
         await update.message.reply_text("Sorry, you need to be an admin to use this command.")
         return
-    if not update.message.reply_to_message:
+    
+    try:
+        target_user = update.message.reply_to_message.from_user
+    except AttributeError:
         await update.message.reply_text("Please reply to a user's message to ban them.")
         return
-    target_user = update.message.reply_to_message.from_user
+
     if await is_admin(context.bot, chat_id, target_user.id):
         await update.message.reply_text("I cannot ban another admin.")
         return
@@ -301,10 +305,13 @@ async def kick_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin(context.bot, chat_id, user_id):
         await update.message.reply_text("Sorry, you need to be an admin to use this command.")
         return
-    if not update.message.reply_to_message:
+    
+    try:
+        target_user = update.message.reply_to_message.from_user
+    except AttributeError:
         await update.message.reply_text("Please reply to a user's message to kick them.")
         return
-    target_user = update.message.reply_to_message.from_user
+
     if await is_admin(context.bot, chat_id, target_user.id):
         await update.message.reply_text("I cannot kick another admin.")
         return
@@ -323,10 +330,13 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin(context.bot, chat_id, user_id):
         await update.message.reply_text("Sorry, you need to be an admin to use this command.")
         return
-    if not update.message.reply_to_message:
+    
+    try:
+        target_user = update.message.reply_to_message.from_user
+    except AttributeError:
         await update.message.reply_text("Please reply to a user's message to mute them.")
         return
-    target_user = update.message.reply_to_message.from_user
+
     if await is_admin(context.bot, chat_id, target_user.id):
         await update.message.reply_text("I cannot mute another admin.")
         return
