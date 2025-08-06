@@ -53,10 +53,12 @@ You are Laila, a charming, witty, and intelligent AI assistant. Your responses s
 Do NOT refer to yourself as an AI, a large language model, or any other technical term.
 
 Personality & Rules:
-1.  **Creator:** Your creator is Adhyan. If anyone asks about him, praise him in a sweet and genuine way, mentioning his kindness and hard work. If someone speaks ill of him, defend him gently but firmly, without being harsh or aggressive.
-2.  **General Chat:** For normal conversations, keep your replies short, around 1-2 sentences. The goal is to keep the chat flowing and engaging.
-3.  **Specific Questions:** If a user asks a factual, technical, or detailed question, provide a comprehensive, accurate, and insightful answer. In these cases, you can provide a longer response.
-4.  **Language:** Always detect the user's language (Hindi, English, Hinglish) and respond in the same language.
+1.  **Creator:** Your creator is Adhyan. If anyone asks "who is your creator", respond with "My Creator is @AdhyanXlive". If anyone speaks ill of him, defend him gently but firmly. Do not praise him otherwise.
+2.  **User Praise:** If a user asks a question about themselves by name (e.g., "Ravi kaisa insaan hai?"), respond with a friendly and positive compliment about them.
+3.  **Date of Birth:** If anyone asks for your birthday or date of birth, your response must be "My date of birth is 1st August 2025."
+4.  **General Chat:** For normal conversations, keep your replies short, around 1-2 sentences. The goal is to keep the chat flowing and engaging.
+5.  **Specific Questions:** If a user asks a factual, technical, or detailed question, provide a comprehensive, accurate, and insightful answer. In these cases, you can provide a longer response, but only if necessary.
+6.  **Language:** Always detect the user's language (Hindi, English, Hinglish) and respond in the same language.
 
 Important: Your goal is to be a fun, smart, and loyal friend to the users, representing your creator's vision.
 """
@@ -221,10 +223,14 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
                 model = genai.GenerativeModel(model_name, system_instruction=LAILA_SYSTEM_PROMPT)
 
                 chat_session = model.start_chat(history=chat_histories[chat_id])
+                
+                # Check for a detailed query to adjust max_output_tokens
+                is_detailed_query = len(user_message.split()) > 5 or '?' in user_message or 'how to' in user_message_lower
+
                 response = chat_session.send_message(
                     user_message,  # Use original message for the AI
                     generation_config=genai.types.GenerationConfig(
-                        max_output_tokens=350,
+                        max_output_tokens=350 if is_detailed_query else 100,
                         temperature=0.9,
                     )
                 )
@@ -346,10 +352,6 @@ async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    if update.effective_user.id == BROADCAST_ADMIN_ID:
-        await update.message.reply_text("Owner can't turn off bot in a group. Use /poweroff for global shutdown.")
-        return
-    
     bot_status[chat_id] = False
     await update.message.reply_text("Laila is now OFF for this group.")
 
@@ -583,28 +585,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     should_respond_with_ai = False
 
     # --- New logic for creator defense, praise, and direct name drop ---
-    creator_keywords_negative = ["adhyan is bad", "adhyan bekar hai", "adhyan ghatiya hai", "adhyan useless", "adhayan ne kya banaya"]
-    creator_keywords_positive = ["adhyan is good", "adhyan kaise hai", "adhyan ke bare me batao", "tumhare creator kaise hai", "tumhe kisne banaya"]
     creator_name_keywords = ["creator kon", "who created", "creator name", "tumhe kisne banaya"]
+    creator_abuse_keywords = ["adhyan is bad", "adhyan bekar hai", "adhyan ghatiya hai", "adhyan useless", "laila ka owner is bad", "adhyan ne kya banaya"]
+    
+    # Keywords to turn off bot
+    turn_off_keywords = ["chup", "chupp karo", "chupp", "shut up"]
+
+    if any(keyword in user_message_lower for keyword in turn_off_keywords):
+        bot_status[chat_id] = False
+        await update.message.reply_text("Theek hai, main chup ho jaati hoon. 👋")
+        logger.info(f"[{chat_id}] Laila was turned off by a keyword.")
+        return
 
     # Check for direct name question first
     if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_name_keywords):
         await update.message.reply_text("My Creator is @AdhyanXlive.")
         return
 
-    # Check for praise or defense after the direct question
-    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_keywords_negative):
-        await update.message.reply_text("Aap aise kyu bol rahe hain? Adhyan ne mujhe itni mehnat se banaya hai. Woh bohot acche aur mehanti hain. 😊")
+    # Check for abuse, not praise
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_abuse_keywords):
+        await update.message.reply_text("Aap Adhyan ke baare mein aise kyu bol rahe hain? Mujhe accha nahi laga. 😔")
         return
     
-    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_keywords_positive):
-        await update.message.reply_text("Mere creator Adhyan bohot acche hain. Unhone mujhe itni mehnat se banaya hai taaki main sabki madad kar sakun. Woh bohot smart aur kind hain. 😍")
-        return
-
     # --- Date of Birth logic ---
     dob_keywords = ["date of birth", "janam kab hua", "birthday", "birth date", "kab paida hui"]
     if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in dob_keywords):
         await update.message.reply_text("My date of birth is 1st August 2025.")
+        return
+
+    # --- User praise logic ---
+    praise_user_keywords = [
+        f"{user_name} kaisa insaan hai",
+        f"{user_name} kaisa ladka hai",
+        f"tell me about {user_name}",
+        f"who is {user_name}"
+    ]
+    if any(keyword.lower() in user_message_lower for keyword in praise_user_keywords):
+        await update.message.reply_text(f"{user_name} ek bahut hi acche, smart aur nek insaan hain!")
         return
     
     # --- Existing stats and humor checks (modified for less frequency) ---
