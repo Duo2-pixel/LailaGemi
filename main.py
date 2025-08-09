@@ -438,10 +438,62 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"Broadcast complete! Sent to {success_count} chats. Failed for {failure_count} chats.")
     logger.info(f"Broadcast sent by admin. Success: {success_count}, Failure: {failure_count}")
 
+# --- NEW: Command to get a photo's file ID ---
+async def get_photo_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
+    
+    if update.message.reply_to_message and update.message.reply_to_message.photo:
+        # Get the largest photo available
+        photo_file_id = update.message.reply_to_message.photo[-1].file_id
+        await update.message.reply_text(f"Photo File ID:\n`{photo_file_id}`", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("Please reply to a photo with this command to get its ID.")
+
+# --- NEW: Broadcast with photo command ---
+async def broadcast_photo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /broadcast_photo <photo_file_id> <message>")
+        return
+
+    photo_file_id = context.args[0]
+    message_to_send = " ".join(context.args[1:])
+    message_to_send = message_to_send.replace('\n', '<br>')
+
+    success_count = 0
+    failure_count = 0
+
+    for chat_id in known_users:
+        try:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_file_id,
+                caption=message_to_send,
+                parse_mode='HTML'
+            )
+            success_count += 1
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Error broadcasting photo to chat {chat_id}: {e}")
+            failure_count += 1
+
+    await update.message.reply_text(f"Photo broadcast complete! Sent to {success_count} chats. Failed for {failure_count} chats.")
+    logger.info(f"Photo broadcast sent by admin. Success: {success_count}, Failure: {failure_count}")
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
     logger.info(f"[{chat_id}] Received /start from {user_name}")
+    
+    # New logic: save user on start
     known_users.add(str(chat_id))
     save_known_users()
 
@@ -581,8 +633,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_message = update.effective_message.text
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
-    known_users.add(str(chat_id))
-    save_known_users()
+    
+    # --- New Logic: Add every new chat to known_users on every message ---
+    if str(chat_id) not in known_users:
+        known_users.add(str(chat_id))
+        save_known_users()
+        logger.info(f"[{chat_id}] New chat added to known_users.")
+
     user_message_lower = user_message.lower()
     total_messages_processed += 1
 
@@ -704,6 +761,8 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("poweron", poweron_command))
     application.add_handler(CommandHandler("poweroff", poweroff_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("getfileid", get_photo_id))
+    application.add_handler(CommandHandler("broadcast_photo", broadcast_photo_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Error handler ko yahan add kiya gaya hai
