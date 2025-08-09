@@ -2,10 +2,8 @@ import os
 import logging
 from collections import defaultdict
 import google.generativeai as genai
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from pytgcalls import PyTgCalls, idle
-from pytgcalls.types import AudioPiped
+from telegram import Update, Bot
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 import time
 import json
@@ -16,15 +14,12 @@ import psutil
 from datetime import datetime
 import asyncio
 from gspread.exceptions import APIError
-import yt_dlp
-import functools
+
+# Load environment variables from .env file
+load_dotenv()
 
 # --- Environment Variables ---
-load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-API_ID = int(os.getenv("API_ID"))  # You must get this from my.telegram.org
-API_HASH = os.getenv("API_HASH")   # You must get this from my.telegram.org
-
 GEMINI_API_KEYS = [
     os.getenv("GEMINI_API_KEY_1"),
     os.getenv("GEMINI_API_KEY_2"),
@@ -40,6 +35,7 @@ except (ValueError, TypeError):
     BROADCAST_ADMIN_ID = 0
     logging.error("BROADCAST_ADMIN_ID is missing or not a valid number. Broadcast functionality will be disabled.")
 
+
 # --- Global Stats Variables ---
 start_time = datetime.now()
 total_messages_processed = 0
@@ -51,16 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Pyrogram and Py-Tgcalls Clients ---
-app = Client(
-    "LailaVCBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=TELEGRAM_BOT_TOKEN
-)
-py_tgcalls = PyTgCalls(app)
-
-# --- Configure Gemini AI ---
+# --- Configure Gemini AI with a smarter, more dynamic prompt ---
 LAILA_SYSTEM_PROMPT = """
 You are Laila, a charming, witty, and intelligent AI assistant. Your responses should be natural and engaging, making users feel like they are talking to a friend. You are a conversationalist, not just a question-answer machine.
 Do NOT refer to yourself as an AI, a large language model, or any other technical term.
@@ -97,6 +84,7 @@ except (FileNotFoundError, json.JSONDecodeError):
 def save_known_users():
     with open("known_users.json", "w") as f:
         json.dump(list(known_users), f)
+
 
 # --- Bot Enable/Disable State (for admin control) ---
 bot_status = defaultdict(lambda: True)
@@ -203,7 +191,7 @@ def clean_message_for_logging(message: str, bot_username: str) -> str:
     return cleaned_message
 
 # --- AI Response Function with Fallback to Google Sheets ---
-async def get_bot_response(user_message: str, chat_id: int, bot_username: str, should_use_ai: bool, update: Message) -> str:
+async def get_bot_response(user_message: str, chat_id: int, bot_username: str, should_use_ai: bool, update: Update) -> str:
     global current_api_key_index, active_api_key, model
     
     user_message_lower = user_message.lower()
@@ -220,7 +208,7 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
         logger.info(f"[{chat_id}] Serving response from static dictionary.")
         return static_response
 
-    if should_use_ai or (update.chat and update.chat.type == 'private'):
+    if should_use_ai or (update.effective_chat and update.effective_chat.type == 'private'):
         max_retries = len(GEMINI_API_KEYS)
         retries = 0
 
@@ -239,10 +227,11 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
 
                 chat_session = model.start_chat(history=chat_histories[chat_id])
                 
+                # Check for a detailed query to adjust max_output_tokens
                 is_detailed_query = len(user_message.split()) > 5 or '?' in user_message or 'how to' in user_message_lower
 
                 response = chat_session.send_message(
-                    user_message,
+                    user_message,  # Use original message for the AI
                     generation_config=genai.types.GenerationConfig(
                         max_output_tokens=350 if is_detailed_query else 100,
                         temperature=0.9,
@@ -275,166 +264,216 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
 
     return None
 
-async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
+async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     try:
-        member = await client.get_chat_member(chat_id, user_id)
+        member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ['creator', 'administrator']
     except Exception as e:
         logger.error(f"Error checking admin status: {e}")
         return False
 
-# --- Admin Functions (Adapted for Pyrogram) ---
-@app.on_message(filters.command("ban"))
-async def ban_user_pyrogram(client: Client, message: Message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
+# --- Error-Handled Admin Commands ---
+async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     
-    if not await is_admin(client, chat_id, user_id):
-        await message.reply("Sorry, you need to be an admin to use this command.")
-        return
-    
-    if not message.reply_to_message:
-        await message.reply("Please reply to a user's message to ban them.")
-        return
-
-    target_user = message.reply_to_message.from_user
-    if await is_admin(client, chat_id, target_user.id):
-        await message.reply("I cannot ban another admin.")
+    if not await is_admin(context.bot, chat_id, user_id):
+        await update.message.reply_text("Sorry, you need to be an admin to use this command.")
         return
     
     try:
-        await client.ban_chat_member(chat_id, target_user.id)
-        await message.reply(f"{target_user.mention} has been banned.")
+        target_user = update.message.reply_to_message.from_user
+    except AttributeError:
+        await update.message.reply_text("Please reply to a user's message to ban them.")
+        return
+
+    if await is_admin(context.bot, chat_id, target_user.id):
+        await update.message.reply_text("I cannot ban another admin.")
+        return
+    try:
+        await context.bot.ban_chat_member(chat_id, target_user.id)
+        await update.message.reply_text(f"{target_user.full_name} has been banned.")
         logger.info(f"[{chat_id}] {user_id} banned {target_user.id}")
     except Exception as e:
-        await message.reply(f"Could not ban user: {e}")
+        await update.message.reply_text(f"Could not ban user: {e}")
         logger.error(f"[{chat_id}] Error banning user {target_user.id}: {e}")
 
-# --- Other admin commands like kick, mute etc. need to be adapted similarly. ---
-# ... (Example for kick and mute below) ...
-@app.on_message(filters.command("kick"))
-async def kick_user_pyrogram(client: Client, message: Message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
+async def kick_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     
-    if not await is_admin(client, chat_id, user_id):
-        await message.reply("Sorry, you need to be an admin to use this command.")
-        return
-    
-    if not message.reply_to_message:
-        await message.reply("Please reply to a user's message to kick them.")
-        return
-
-    target_user = message.reply_to_message.from_user
-    if await is_admin(client, chat_id, target_user.id):
-        await message.reply("I cannot kick another admin.")
+    if not await is_admin(context.bot, chat_id, user_id):
+        await update.message.reply_text("Sorry, you need to be an admin to use this command.")
         return
     
     try:
-        await client.kick_chat_member(chat_id, target_user.id)
-        await message.reply(f"{target_user.mention} has been kicked.")
+        target_user = update.message.reply_to_message.from_user
+    except AttributeError:
+        await update.message.reply_text("Please reply to a user's message to kick them.")
+        return
+
+    if await is_admin(context.bot, chat_id, target_user.id):
+        await update.message.reply_text("I cannot kick another admin.")
+        return
+    try:
+        await context.bot.unban_chat_member(chat_id, target_user.id)
+        await update.message.reply_text(f"{target_user.full_name} has been kicked.")
         logger.info(f"[{chat_id}] {user_id} kicked {target_user.id}")
     except Exception as e:
-        await message.reply(f"Could not kick user: {e}")
+        await update.message.reply_text(f"Could not kick user: {e}")
         logger.error(f"[{chat_id}] Error kicking user {target_user.id}: {e}")
 
-@app.on_message(filters.command("mute"))
-async def mute_user_pyrogram(client: Client, message: Message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
+async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     
-    if not await is_admin(client, chat_id, user_id):
-        await message.reply("Sorry, you need to be an admin to use this command.")
-        return
-    
-    if not message.reply_to_message:
-        await message.reply("Please reply to a user's message to mute them.")
-        return
-
-    target_user = message.reply_to_message.from_user
-    if await is_admin(client, chat_id, target_user.id):
-        await message.reply("I cannot mute another admin.")
+    if not await is_admin(context.bot, chat_id, user_id):
+        await update.message.reply_text("Sorry, you need to be an admin to use this command.")
         return
     
     try:
-        await client.restrict_chat_member(
+        target_user = update.message.reply_to_message.from_user
+    except AttributeError:
+        await update.message.reply_text("Please reply to a user's message to mute them.")
+        return
+
+    if await is_admin(context.bot, chat_id, target_user.id):
+        await update.message.reply_text("I cannot mute another admin.")
+        return
+    try:
+        await context.bot.restrict_chat_member(
             chat_id,
             target_user.id,
             permissions=None
         )
-        await message.reply(f"{target_user.mention} has been muted.")
+        await update.message.reply_text(f"{target_user.full_name} has been muted.")
         logger.info(f"[{chat_id}] {user_id} muted {target_user.id}")
     except Exception as e:
-        await message.reply(f"Could not mute user: {e}")
+        await update.message.reply_text(f"Could not mute user: {e}")
         logger.error(f"[{chat_id}] Error muting user {target_user.id}: {e}")
-
-
-# --- ON/OFF and Power Commands ---
-@app.on_message(filters.command("on"))
-async def on_command_pyrogram(client: Client, message: Message):
-    chat_id = message.chat.id
+        
+# --- ON/OFF for everyone ---
+async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
     global global_bot_status
     if not global_bot_status:
-        await message.reply("The bot is globally powered off by the owner and cannot be turned on in this group.")
+        await update.message.reply_text("The bot is globally powered off by the owner and cannot be turned on in this group.")
         return
     
     bot_status[chat_id] = True
-    await message.reply("Laila is now ON for this group.")
+    await update.message.reply_text("Laila is now ON for this group.")
 
-@app.on_message(filters.command("off"))
-async def off_command_pyrogram(client: Client, message: Message):
-    chat_id = message.chat.id
+async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
     bot_status[chat_id] = False
-    await message.reply("Laila is now OFF for this group.")
+    await update.message.reply_text("Laila is now OFF for this group.")
 
-# --- Broadcast Commands (Admin only) ---
-@app.on_message(filters.command("broadcast") & filters.user(BROADCAST_ADMIN_ID))
-async def broadcast_command_pyrogram(client: Client, message: Message):
-    if not message.command or len(message.command) < 2:
-        await message.reply("Please provide a message to broadcast after the command.")
+# --- POWERON/POWEROFF for Owner only ---
+async def poweron_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    global global_bot_status
+    
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
         return
     
-    message_to_send = message.text.split(None, 1)[1]
+    if global_bot_status:
+        await update.message.reply_text("The bot is already globally powered on.")
+        return
+
+    global_bot_status = True
+    await update.message.reply_text("The bot has been globally powered ON.")
+
+async def poweroff_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    global global_bot_status
+    
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
+
+    if not global_bot_status:
+        await update.message.reply_text("The bot is already globally powered OFF.")
+        return
+
+    global_bot_status = False
+    await update.message.reply_text("The bot has been globally powered OFF.")
+    
+    # Gracefully stop the webhook server
+    application.stop()
+
+# --- Broadcast command for Owner only, preserving formatting ---
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Please provide a message to broadcast after the command.")
+        return
+
+    message_to_send = " ".join(context.args)
+
     success_count = 0
     failure_count = 0
     
+    # A simple way to preserve line breaks is to use HTML.
+    # We replace newline characters with <br> tags.
     message_to_send = message_to_send.replace('\n', '<br>')
     
     for chat_id in known_users:
         try:
-            await client.send_message(
-                chat_id=int(chat_id),
+            await context.bot.send_message(
+                chat_id=chat_id,
                 text=message_to_send,
                 parse_mode='HTML'
             )
             success_count += 1
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.1) # Add a small delay to avoid rate limits
         except Exception as e:
             logger.error(f"Error broadcasting to chat {chat_id}: {e}")
             failure_count += 1
-            
-    await message.reply(f"Broadcast complete! Sent to {success_count} chats. Failed for {failure_count} chats.")
+
+    await update.message.reply_text(f"Broadcast complete! Sent to {success_count} chats. Failed for {failure_count} chats.")
     logger.info(f"Broadcast sent by admin. Success: {success_count}, Failure: {failure_count}")
 
-# --- Photo Broadcast Commands (Admin only) ---
-@app.on_message(filters.command("broadcast_photo") & filters.user(BROADCAST_ADMIN_ID))
-async def broadcast_photo_command_pyrogram(client: Client, message: Message):
-    if not message.command or len(message.command) < 2:
-        await message.reply("Usage: /broadcast_photo <photo_file_id> <message>")
+# --- NEW: Command to get a photo's file ID ---
+async def get_photo_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
         return
     
-    args = message.text.split(None, 2)
-    photo_file_id = args[1]
-    message_to_send = args[2] if len(args) > 2 else ""
-    message_to_send = message_to_send.replace('\n', '<br>')
+    if update.message.reply_to_message and update.message.reply_to_message.photo:
+        # Get the largest photo available
+        photo_file_id = update.message.reply_to_message.photo[-1].file_id
+        await update.message.reply_text(f"Photo File ID:\n`{photo_file_id}`", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("Please reply to a photo with this command to get its ID.")
+
+# --- NEW: Broadcast with photo command ---
+async def broadcast_photo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
     
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /broadcast_photo <photo_file_id> <message>")
+        return
+
+    photo_file_id = context.args[0]
+    message_to_send = " ".join(context.args[1:])
+    message_to_send = message_to_send.replace('\n', '<br>')
+
     success_count = 0
     failure_count = 0
-    
+
     for chat_id in known_users:
         try:
-            await client.send_photo(
-                chat_id=int(chat_id),
+            await context.bot.send_photo(
+                chat_id=chat_id,
                 photo=photo_file_id,
                 caption=message_to_send,
                 parse_mode='HTML'
@@ -444,25 +483,32 @@ async def broadcast_photo_command_pyrogram(client: Client, message: Message):
         except Exception as e:
             logger.error(f"Error broadcasting photo to chat {chat_id}: {e}")
             failure_count += 1
-            
-    await message.reply(f"Photo broadcast complete! Sent to {success_count} chats. Failed for {failure_count} chats.")
-    logger.info(f"Photo broadcast sent by admin. Success: {success_count}, Failure: {failure_count}")
-    
-@app.on_message(filters.command("getfileid") & filters.user(BROADCAST_ADMIN_ID) & filters.reply)
-async def get_photo_id_pyrogram(client: Client, message: Message):
-    if message.reply_to_message and message.reply_to_message.photo:
-        photo_file_id = message.reply_to_message.photo.file_id
-        await message.reply(f"Photo File ID:\n`{photo_file_id}`", parse_mode='Markdown')
-    else:
-        await message.reply("Please reply to a photo with this command to get its ID.")
 
-# --- Stats Command ---
-@app.on_message(filters.command("stats"))
-async def stats_command_pyrogram(client: Client, message: Message):
+    await update.message.reply_text(f"Photo broadcast complete! Sent to {success_count} chats. Failed for {failure_count} chats.")
+    logger.info(f"Photo broadcast sent by admin. Success: {success_count}, Failure: {failure_count}")
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_name = update.effective_user.first_name
+    chat_id = update.effective_chat.id
+    logger.info(f"[{chat_id}] Received /start from {user_name}")
+    
+    # New logic: save user on start
+    known_users.add(str(chat_id))
+    save_known_users()
+
+    welcome_message = (
+        f"Hi {user_name}! I am Laila, your friendly AI assistant. I can chat, answer questions, and much more!\n\n"
+        "**Quick Privacy Notice:** To learn and give you faster, better answers, I save our conversations in a private log. This data is kept completely private and is never shared."
+    )
+    await update.message.reply_text(welcome_message)
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows the bot's current stats in a formatted message."""
     global start_time
     
     ping_start = time.time()
-    await client.send_chat_action(chat_id=message.chat.id, action="typing")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     ping_end = time.time()
     
     uptime = datetime.now() - start_time
@@ -483,88 +529,118 @@ async def stats_command_pyrogram(client: Client, message: Message):
         f"💾 **Disk**: `{disk_usage}%`\n\n"
         "✨ by AdhyanXlive ✨"
     )
-    await message.reply(response_text, parse_mode='Markdown')
-    logger.info(f"[{message.chat.id}] /stats command used. Uptime: {uptime_str}")
-    
-# --- VC Functions ---
-@app.on_message(filters.command("play") | filters.regex(r"^(play|baja do)\s+(.+)", re.IGNORECASE))
-async def play_song_command(client: Client, message: Message):
-    if not message.chat.type in ["supergroup", "group"]:
-        return await message.reply("This command only works in groups.")
-    
-    user_message = message.text
-    song_query = ""
-    
-    if message.command and len(message.command) > 1:
-        song_query = " ".join(message.command[1:])
-    else:
-        match = re.search(r'play|baja do)\s+(.+)', user_message, re.IGNORECASE)
-        if match:
-            song_query = match.group(2).strip()
-    
-    if not song_query:
-        return await message.reply("Please provide a song name or YouTube link to play.")
+    await update.message.reply_text(response_text, parse_mode='Markdown')
+    logger.info(f"[{update.effective_chat.id}] /stats command used. Uptime: {uptime_str}")
 
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows detailed bot stats for the admin only."""
+    user_id = update.effective_user.id
+
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, you don't have permission to use this command.")
+        return
+
+    ping_start = time.time()
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    ping_end = time.time()
+    
+    uptime = datetime.now() - start_time
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{uptime.days}d {hours}h {minutes}m {seconds}s"
+    
+    ram_usage = psutil.virtual_memory().percent
+    cpu_usage = psutil.cpu_percent(interval=1)
+    disk_usage = psutil.disk_usage('/').percent
+    
+    # --- Service Status Checks ---
+    bot_connection_status = "✅ Connected"
     try:
-        await message.reply(f"Searching for **{song_query}** and trying to play it in VC...")
-        
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': 'downloads/%(title)s.%(ext)s',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'quiet': True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(song_query, download=False)
-            if 'entries' in info:
-                video = info['entries'][0]
-            else:
-                video = info
-            
-            song_url = video['url']
-            song_title = video.get('title', 'Unknown Title')
-            
-            # This part needs to be improved for direct streaming without downloading.
-            # For now, it's a simple placeholder to show the flow.
-            # You would need to download the file and then pass the file path.
-            # A temporary file download is needed here.
-            
-            await py_tgcalls.join_group_call(
-                message.chat.id,
-                AudioPiped(song_url)
-            )
-            await message.reply(f"🎶 Playing: **{song_title}**")
-            
+        await context.bot.get_me()
+    except Exception:
+        bot_connection_status = "❌ Failed"
+    
+    sheets_connection_status = "✅ Connected"
+    try:
+        sheet, _ = get_google_sheet_connection()
+        if not sheet or not sheet.title:
+            raise Exception("Could not get sheet title")
     except Exception as e:
-        logger.error(f"Error playing song: {e}", exc_info=True)
-        await message.reply("Sorry, I could not play that song.")
+        sheets_connection_status = f"❌ Failed: {e}"
 
-@app.on_message(filters.command("stop") | filters.command("end"))
-async def stop_song_command(client: Client, message: Message):
-    if not py_tgcalls.is_call_active(message.chat.id):
-        return await message.reply("No song is currently playing in the VC.")
-    
-    await py_tgcalls.leave_group_call(message.chat.id)
-    await message.reply("VC ended. See you next time!")
+    env_vars_status = "✅ All set"
+    if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEYS[0], BROADCAST_ADMIN_ID, WEBHOOK_URL]):
+        env_vars_status = "⚠️ Missing key variables"
 
-# --- Main Message Handler (with AI and other logic) ---
-@app.on_message(filters.text)
-async def handle_message_pyrogram(client: Client, message: Message):
+    render_status = "✅ Active" if os.getenv("RENDER_EXTERNAL_URL") else "⚠️ Local/Unknown"
+
+    # --- API Key Status ---
+    api_key_status_text = ""
+    for i, key in enumerate(GEMINI_API_KEYS):
+        if key:
+            key_short = key[-5:]
+            status = "Active" if key == active_api_key else "Inactive"
+            if time.time() < key_cooldown_until[key]:
+                cooldown_remaining = int(key_cooldown_until[key] - time.time())
+                status = f"Cooldown ({cooldown_remaining}s)"
+            api_key_status_text += f"Key {i+1} (`...{key_short}`): {status}\n"
+        else:
+            api_key_status_text += f"Key {i+1}: ❌ Missing\n"
+
+
+    response_text = (
+        "👑 **Laila's Admin Report** 👑\n\n"
+        "**System Health**\n"
+        f" Ping: `{int((ping_end - ping_start) * 1000)}ms`\n"
+        f" Uptime: `{uptime_str}`\n"
+        f" RAM: `{ram_usage}%`\n"
+        f" CPU: `{cpu_usage}%`\n"
+        f" Disk: `{disk_usage}%`\n\n"
+        "**Service Status**\n"
+        f" Bot Connection: `{bot_connection_status}`\n"
+        f" Google Sheets: `{sheets_connection_status}`\n"
+        f" Environment Variables: `{env_vars_status}`\n"
+        f" Render Status: `{render_status}`\n\n"
+        "**Bot Stats**\n"
+        f" Total Chats: `{len(known_users)}`\n"
+        f" Total Messages: `{total_messages_processed}`\n\n"
+        "**API Status**\n"
+        f"{api_key_status_text}"
+        "\n✨ by AdhyanXlive ✨"
+    )
+    await update.message.reply_text(response_text, parse_mode='Markdown')
+    logger.info(f"[{update.effective_chat.id}] /adminstats command used by admin.")
+
+# --- AI check to see if a message is directed at the bot ---
+async def is_message_for_laila(user_message: str) -> bool:
+    prompt = f"Given the user message: '{user_message}', is it a question or command directed at an AI assistant? Answer only 'Yes' or 'No'."
+    try:
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.1,  # Low temperature for a direct answer
+                max_output_tokens=10
+            )
+        )
+        return "yes" in response.text.lower()
+    except Exception as e:
+        logger.error(f"Error checking if message is for Laila: {e}")
+        return False
+
+# --- HANDLERS ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global total_messages_processed, global_bot_status
-    user_message = message.text
-    user_name = message.from_user.first_name
-    chat_id = message.chat.id
+    user_message = update.effective_message.text
+    user_name = update.effective_user.first_name
+    chat_id = update.effective_chat.id
     
+    # --- New Logic: Add every new chat to known_users on every message ---
     if str(chat_id) not in known_users:
         known_users.add(str(chat_id))
         save_known_users()
         logger.info(f"[{chat_id}] New chat added to known_users.")
 
+    user_message_lower = user_message.lower()
     total_messages_processed += 1
 
     if not global_bot_status:
@@ -574,27 +650,127 @@ async def handle_message_pyrogram(client: Client, message: Message):
     if not bot_status[chat_id]:
         logger.info(f"[{chat_id}] Bot is disabled for this group. Ignoring message from {user_name}.")
         return
-    
-    # Handle Laila's custom logic here (Creator, Praise, etc.)
-    # ... (Your existing logic) ...
-    
-    # AI logic
-    # ... (Your existing AI response logic) ...
 
-    # This part needs to be re-written to fit the new Pyrogram framework
-    # The `handle_message` function is the place to put all your AI logic
-    # I have put the handle_message_pyrogram function above with the appropriate decorators
-    # and VC functions are separated with their own decorators.
+    chat_type = update.effective_chat.type
+    should_respond_with_ai = False
 
-# --- Main function to run the bot ---
-async def main():
-    await app.start()
-    await py_tgcalls.start()
-    print("Laila VC bot is running!")
-    await idle()
-    await py_tgcalls.stop()
-    await app.stop()
-    print("Laila VC bot stopped.")
+    # --- New logic for creator defense, praise, and direct name drop ---
+    creator_name_keywords = ["creator kon", "who created", "creator name", "tumhe kisne banaya"]
+    creator_abuse_keywords = ["adhyan is bad", "adhyan bekar hai", "adhyan ghatiya hai", "adhyan useless", "laila ka owner is bad", "adhyan ne kya banaya"]
+    
+    # Keywords to turn off bot
+    turn_off_keywords = ["chup", "chupp karo", "chupp", "shut up"]
+
+    if any(keyword in user_message_lower for keyword in turn_off_keywords):
+        bot_status[chat_id] = False
+        await update.message.reply_text("Theek hai, main chup ho jaati hoon. 👋")
+        logger.info(f"[{chat_id}] Laila was turned off by a keyword.")
+        return
+
+    # Check for direct name question first
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_name_keywords):
+        await update.message.reply_text("My Creator is @AdhyanXlive.")
+        return
+
+    # Check for abuse, not praise
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_abuse_keywords):
+        await update.message.reply_text("Aap Adhyan ke baare mein aise kyu bol rahe hain? Mujhe accha nahi laga. 😔")
+        return
+    
+    # --- Date of Birth logic ---
+    dob_keywords = ["date of birth", "janam kab hua", "birthday", "birth date", "kab paida hui"]
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in dob_keywords):
+        await update.message.reply_text("My date of birth is 1st August 2025.")
+        return
+
+    # --- User praise logic ---
+    praise_user_keywords = [
+        f"{user_name} kaisa insaan hai",
+        f"{user_name} kaisa ladka hai",
+        f"tell me about {user_name}",
+        f"who is {user_name}"
+    ]
+    if any(keyword.lower() in user_message_lower for keyword in praise_user_keywords):
+        await update.message.reply_text(f"{user_name} ek bahut hi acche, smart aur nek insaan hain!")
+        return
+    
+    # --- Existing stats and humor checks (modified for less frequency) ---
+    stats_keywords = ["your stats", "laila stats", "show stats", "bot stats", "stats"]
+    if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in stats_keywords):
+        await stats_command(update, context)
+        return
+
+    if chat_type != 'private':
+        bot_username = context.bot.name.lower()
+        is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot
+        is_mentioned_or_named = (
+            re.search(r'\b(laila|' + re.escape(bot_username) + r')\b', user_message_lower) or
+            user_message_lower.startswith(('laila', '@' + bot_username))
+        )
+        
+        if is_reply_to_bot or is_mentioned_or_named:
+            should_respond_with_ai = True
+        else:
+            # Use AI to understand intent only if not directly addressed
+            if await is_message_for_laila(user_message):
+                should_respond_with_ai = True
+
+    elif chat_type == 'private':
+        should_respond_with_ai = True
+
+    if should_respond_with_ai:
+        HUMOR_KEYWORDS = ["lol", "haha", "😂", "🤣🤣", "🤣🤣🤣"]
+        FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
+        
+        # Respond to humor keywords with low probability
+        if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in HUMOR_KEYWORDS) and random.random() < 0.1:
+            await update.message.reply_text(random.choice(FUNNY_RESPONSES))
+            return
+        
+        add_to_history(chat_id, "user", user_message)
+        response_text = await get_bot_response(user_message, chat_id, context.bot.name, should_respond_with_ai, update)
+        
+        if response_text:
+            add_to_history(chat_id, "model", response_text)
+            await update.message.reply_text(response_text)
+
+# --- Error Handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a telegram message to notify the developer."""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(f"An error occurred: {context.error}")
+    except Exception as e:
+        logger.error(f"Failed to send error message: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables.")
+
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("adminstats", admin_stats_command))
+    application.add_handler(CommandHandler("ban", ban_user))
+    application.add_handler(CommandHandler("kick", kick_user))
+    application.add_handler(CommandHandler("mute", mute_user))
+    application.add_handler(CommandHandler("on", on_command))
+    application.add_handler(CommandHandler("off", off_command))
+    application.add_handler(CommandHandler("poweron", poweron_command))
+    application.add_handler(CommandHandler("poweroff", poweroff_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("getfileid", get_photo_id))
+    application.add_handler(CommandHandler("broadcast_photo", broadcast_photo_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Error handler ko yahan add kiya gaya hai
+    application.add_error_handler(error_handler)
+
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", "8000")),
+        url_path=TELEGRAM_BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+    )
