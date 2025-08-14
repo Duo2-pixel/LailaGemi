@@ -886,7 +886,7 @@ if __name__ == "__main__":
             listen="0.0.0.0",
             port=int(os.environ.get("PORT", "8443")),
             url_path=TELEGRAM_BOT_TOKEN,
-            webhook_url=WEBHOOK_URL + TELEGRAM_BOT_TOKEN
+            webhook_url=WEBHOOK_URL + "/" + TELEGRAM_BOT_TOKEN
         )
     else:
         application.run_polling(allowed_updates=Update.ALL_TYPES)
