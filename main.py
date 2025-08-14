@@ -7,13 +7,12 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from dotenv import load_dotenv
 import time
 import json
-import random
 import re
 import gspread
 import psutil
 from datetime import datetime
 import asyncio
-from gspread.exceptions import APIError
+from gspread.exceptions import APIError, WorksheetNotFound
 
 # Load environment variables from .env file
 load_dotenv()
@@ -35,10 +34,10 @@ except (ValueError, TypeError):
     BROADCAST_ADMIN_ID = 0
     logging.error("BROADCAST_ADMIN_ID is missing or not a valid number. Broadcast functionality will be disabled.")
 
-
 # --- Global Stats Variables ---
 start_time = datetime.now()
 total_messages_processed = 0
+known_users = set()
 
 # --- Logging Basic Configuration ---
 logging.basicConfig(
@@ -72,19 +71,6 @@ def add_to_history(chat_id, role, text):
     chat_histories[chat_id].append({'role': role, 'parts': [text]})
     if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
         chat_histories[chat_id].pop(0)
-
-# --- User Tracking for Broadcast ---
-known_users = set()
-try:
-    with open("known_users.json", "r") as f:
-        known_users = set(json.load(f))
-except (FileNotFoundError, json.JSONDecodeError):
-    pass
-
-def save_known_users():
-    with open("known_users.json", "w") as f:
-        json.dump(list(known_users), f)
-
 
 # --- Bot Enable/Disable State (for admin control) ---
 bot_status = defaultdict(lambda: True)
@@ -190,6 +176,57 @@ def clean_message_for_logging(message: str, bot_username: str) -> str:
     cleaned_message = re.sub(r'\s+', ' ', cleaned_message).strip()
     return cleaned_message
 
+# --- NEW: Function to get/create the 'chats' worksheet ---
+def get_chats_worksheet(client):
+    try:
+        return client.open_by_url("https://docs.google.com/spreadsheets/d/1s8rXXPKePuTQ3E2R0O-bZl3NJb1N7akdkE52WVpoOGg/edit").worksheet("chats")
+    except WorksheetNotFound:
+        spreadsheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1s8rXXPKePuTQ3E2R0O-bZl3NJb1N7akdkE52WVpoOGg/edit")
+        return spreadsheet.add_worksheet("chats", rows="1000", cols="2")
+
+# --- NEW: Function to save a chat ID to Google Sheets ---
+def save_chat_id(chat_id):
+    try:
+        creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+        if not creds_json:
+            logger.error("GOOGLE_SHEETS_CREDENTIALS not found.")
+            return
+
+        creds_dict = json.loads(creds_json)
+        client = gspread.service_account_from_dict(creds_dict)
+        
+        chat_sheet = get_chats_worksheet(client)
+        
+        existing_ids = chat_sheet.col_values(1)
+        if str(chat_id) in existing_ids:
+            return
+
+        chat_sheet.append_row([str(chat_id), datetime.now().isoformat()])
+        logger.info(f"Saved new chat ID: {chat_id}")
+
+    except Exception as e:
+        logger.error(f"Error saving chat ID to Google Sheet: {e}")
+
+# --- NEW: Function to load all known users/chats from Google Sheets ---
+def load_known_users():
+    global known_users
+    try:
+        creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+        if not creds_json:
+            logger.error("GOOGLE_SHEETS_CREDENTIALS not found.")
+            return
+
+        creds_dict = json.loads(creds_json)
+        client = gspread.service_account_from_dict(creds_dict)
+        chat_sheet = get_chats_worksheet(client)
+        
+        chat_ids = chat_sheet.col_values(1)
+        known_users = set(chat_ids)
+        logger.info(f"Loaded {len(known_users)} chats from Google Sheets.")
+
+    except Exception as e:
+        logger.error(f"Error loading known users from Google Sheet: {e}")
+
 # --- AI Response Function with Fallback to Google Sheets ---
 async def get_bot_response(user_message: str, chat_id: int, bot_username: str, should_use_ai: bool, update: Update) -> str:
     global current_api_key_index, active_api_key, model
@@ -227,11 +264,10 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
 
                 chat_session = model.start_chat(history=chat_histories[chat_id])
                 
-                # Check for a detailed query to adjust max_output_tokens
                 is_detailed_query = len(user_message.split()) > 5 or '?' in user_message or 'how to' in user_message_lower
 
                 response = chat_session.send_message(
-                    user_message,  # Use original message for the AI
+                    user_message,
                     generation_config=genai.types.GenerationConfig(
                         max_output_tokens=350 if is_detailed_query else 100,
                         temperature=0.9,
@@ -249,8 +285,9 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
 
             except Exception as e:
                 error_str = str(e)
-                if "429 Quota exceeded" in error_str or "You exceeded your current quota" in error_str:
-                    key_cooldown_until[active_api_key] = time.time() + (24 * 60 * 60)
+                if "429 Quota exceeded" in error_str or "You exceeded your current quota" in error_str or "500" in error_str:
+                    logger.warning(f"[{chat_id}] API key {active_api_key[-5:]} failed with error: {e}. Shifting to next key.")
+                    key_cooldown_until[active_api_key] = time.time() + (1 * 60 * 60)
                     current_api_key_index = (current_api_key_index + 1) % len(GEMINI_API_KEYS)
                     active_api_key = GEMINI_API_KEYS[current_api_key_index]
                     retries += 1
@@ -399,7 +436,6 @@ async def poweroff_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     global_bot_status = False
     await update.message.reply_text("The bot has been globally powered OFF.")
     
-    # Gracefully stop the webhook server
     application.stop()
 
 # --- Broadcast command for Owner only, preserving formatting ---
@@ -414,13 +450,14 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     message_to_send = " ".join(context.args)
+    message_to_send = message_to_send.replace('\n', '<br>')
 
     success_count = 0
     failure_count = 0
     
-    # A simple way to preserve line breaks is to use HTML.
-    # We replace newline characters with <br> tags.
-    message_to_send = message_to_send.replace('\n', '<br>')
+    global known_users
+    if not known_users:
+        load_known_users()
     
     for chat_id in known_users:
         try:
@@ -430,7 +467,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 parse_mode='HTML'
             )
             success_count += 1
-            await asyncio.sleep(0.1) # Add a small delay to avoid rate limits
+            await asyncio.sleep(0.1)
         except Exception as e:
             logger.error(f"Error broadcasting to chat {chat_id}: {e}")
             failure_count += 1
@@ -438,7 +475,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"Broadcast complete! Sent to {success_count} chats. Failed for {failure_count} chats.")
     logger.info(f"Broadcast sent by admin. Success: {success_count}, Failure: {failure_count}")
 
-# --- NEW: Command to get a photo's file ID ---
+# --- Command to get a photo's file ID ---
 async def get_photo_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if user_id != BROADCAST_ADMIN_ID:
@@ -446,13 +483,12 @@ async def get_photo_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     
     if update.message.reply_to_message and update.message.reply_to_message.photo:
-        # Get the largest photo available
         photo_file_id = update.message.reply_to_message.photo[-1].file_id
         await update.message.reply_text(f"Photo File ID:\n`{photo_file_id}`", parse_mode='Markdown')
     else:
         await update.message.reply_text("Please reply to a photo with this command to get its ID.")
 
-# --- NEW: Broadcast with photo command ---
+# --- Broadcast with photo command ---
 async def broadcast_photo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if user_id != BROADCAST_ADMIN_ID:
@@ -469,6 +505,10 @@ async def broadcast_photo_command(update: Update, context: ContextTypes.DEFAULT_
 
     success_count = 0
     failure_count = 0
+
+    global known_users
+    if not known_users:
+        load_known_users()
 
     for chat_id in known_users:
         try:
@@ -487,15 +527,49 @@ async def broadcast_photo_command(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(f"Photo broadcast complete! Sent to {success_count} chats. Failed for {failure_count} chats.")
     logger.info(f"Photo broadcast sent by admin. Success: {success_count}, Failure: {failure_count}")
 
+# --- NEW: Forward a message to all known chats ---
+async def forward_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Please reply to a message to forward it to all chats.")
+        return
+
+    success_count = 0
+    failure_count = 0
+
+    global known_users
+    if not known_users:
+        load_known_users()
+
+    for chat_id in known_users:
+        try:
+            await context.bot.forward_message(
+                chat_id=chat_id,
+                from_chat_id=update.message.chat_id,
+                message_id=update.message.reply_to_message.message_id
+            )
+            success_count += 1
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Error forwarding message to chat {chat_id}: {e}")
+            failure_count += 1
+
+    await update.message.reply_text(f"Message forwarded! Sent to {success_count} chats. Failed for {failure_count} chats.")
+    logger.info(f"Message forwarded by admin. Success: {success_count}, Failure: {failure_count}")
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
     logger.info(f"[{chat_id}] Received /start from {user_name}")
     
-    # New logic: save user on start
-    known_users.add(str(chat_id))
-    save_known_users()
+    if str(chat_id) not in known_users:
+        known_users.add(str(chat_id))
+        save_chat_id(chat_id)
 
     welcome_message = (
         f"Hi {user_name}! I am Laila, your friendly AI assistant. I can chat, answer questions, and much more!\n\n"
@@ -611,6 +685,41 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(response_text, parse_mode='Markdown')
     logger.info(f"[{update.effective_chat.id}] /adminstats command used by admin.")
 
+# --- NEW: Show all known chats with links for groups ---
+async def show_chats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the bot owner only.")
+        return
+
+    global known_users
+    if not known_users:
+        load_known_users()
+    
+    known_chats = list(known_users)
+    if not known_chats:
+        await update.message.reply_text("The bot is not in any groups or private chats yet.")
+        return
+
+    chat_details = []
+    for chat_id in known_chats:
+        try:
+            chat = await context.bot.get_chat(chat_id)
+            if chat.type == 'private':
+                chat_details.append(f"• **User**: `{chat.full_name}` (ID: `{chat_id}`)")
+            elif chat.username:
+                chat_details.append(f"• **Group**: `{chat.title}` (ID: `{chat_id}`)\n  Link: [t.me/{chat.username}](https://t.me/{chat.username})")
+            else:
+                chat_details.append(f"• **Group**: `{chat.title}` (ID: `{chat_id}`)\n  *No username found.*")
+        except Exception:
+            chat_details.append(f"• **Unknown Chat**: ID: `{chat_id}` (Bot may have been removed)")
+        
+        await asyncio.sleep(0.1)
+
+    response_text = "✨ **Laila's Chats** ✨\n\n" + "\n\n".join(chat_details)
+    await update.message.reply_text(response_text, parse_mode='Markdown')
+    logger.info(f"[{update.effective_chat.id}] /show_chats command used by admin.")
+
 # --- AI check to see if a message is directed at the bot ---
 async def is_message_for_laila(user_message: str) -> bool:
     prompt = f"Given the user message: '{user_message}', is it a question or command directed at an AI assistant? Answer only 'Yes' or 'No'."
@@ -618,7 +727,7 @@ async def is_message_for_laila(user_message: str) -> bool:
         response = model.generate_content(
             prompt,
             generation_config=genai.types.GenerationConfig(
-                temperature=0.1,  # Low temperature for a direct answer
+                temperature=0.1,
                 max_output_tokens=10
             )
         )
@@ -634,11 +743,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
     
-    # --- New Logic: Add every new chat to known_users on every message ---
+    if not user_message:
+        return
+    
     if str(chat_id) not in known_users:
         known_users.add(str(chat_id))
-        save_known_users()
-        logger.info(f"[{chat_id}] New chat added to known_users.")
+        save_chat_id(chat_id)
+        logger.info(f"[{chat_id}] New chat added to known_users from message handler.")
 
     user_message_lower = user_message.lower()
     total_messages_processed += 1
@@ -654,11 +765,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_type = update.effective_chat.type
     should_respond_with_ai = False
 
-    # --- New logic for creator defense, praise, and direct name drop ---
     creator_name_keywords = ["creator kon", "who created", "creator name", "tumhe kisne banaya"]
     creator_abuse_keywords = ["adhyan is bad", "adhyan bekar hai", "adhyan ghatiya hai", "adhyan useless", "laila ka owner is bad", "adhyan ne kya banaya"]
     
-    # Keywords to turn off bot
     turn_off_keywords = ["chup", "chupp karo", "chupp", "shut up"]
 
     if any(keyword in user_message_lower for keyword in turn_off_keywords):
@@ -667,23 +776,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.info(f"[{chat_id}] Laila was turned off by a keyword.")
         return
 
-    # Check for direct name question first
     if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_name_keywords):
         await update.message.reply_text("My Creator is @AdhyanXlive.")
         return
 
-    # Check for abuse, not praise
     if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in creator_abuse_keywords):
         await update.message.reply_text("Aap Adhyan ke baare mein aise kyu bol rahe hain? Mujhe accha nahi laga. 😔")
         return
     
-    # --- Date of Birth logic ---
     dob_keywords = ["date of birth", "janam kab hua", "birthday", "birth date", "kab paida hui"]
     if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in dob_keywords):
         await update.message.reply_text("My date of birth is 1st August 2025.")
         return
 
-    # --- User praise logic ---
     praise_user_keywords = [
         f"{user_name} kaisa insaan hai",
         f"{user_name} kaisa ladka hai",
@@ -694,7 +799,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"{user_name} ek bahut hi acche, smart aur nek insaan hain!")
         return
     
-    # --- Existing stats and humor checks (modified for less frequency) ---
     stats_keywords = ["your stats", "laila stats", "show stats", "bot stats", "stats"]
     if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in stats_keywords):
         await stats_command(update, context)
@@ -711,7 +815,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if is_reply_to_bot or is_mentioned_or_named:
             should_respond_with_ai = True
         else:
-            # Use AI to understand intent only if not directly addressed
             if await is_message_for_laila(user_message):
                 should_respond_with_ai = True
 
@@ -722,7 +825,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         HUMOR_KEYWORDS = ["lol", "haha", "😂", "🤣🤣", "🤣🤣🤣"]
         FUNNY_RESPONSES = ["hehehe, that's a good one!", "🤣 I'm just a bot, but I get it!", "Too funny! 😂", "hahaha, you guys are hilarious!", "Bwahahaha! 😅"]
         
-        # Respond to humor keywords with low probability
         if any(re.search(r'\b' + keyword + r'\b', user_message_lower) for keyword in HUMOR_KEYWORDS) and random.random() < 0.1:
             await update.message.reply_text(random.choice(FUNNY_RESPONSES))
             return
@@ -736,7 +838,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # --- Error Handler ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and send a telegram message to notify the developer."""
     logger.error("Exception while handling an update:", exc_info=context.error)
     try:
         if update and update.effective_message:
@@ -750,27 +851,42 @@ if __name__ == "__main__":
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
+    # Load known users at startup
+    load_known_users()
+
+    # Public commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("adminstats", admin_stats_command))
-    application.add_handler(CommandHandler("ban", ban_user))
-    application.add_handler(CommandHandler("kick", kick_user))
-    application.add_handler(CommandHandler("mute", mute_user))
     application.add_handler(CommandHandler("on", on_command))
     application.add_handler(CommandHandler("off", off_command))
+
+    # Owner-only commands
+    application.add_handler(CommandHandler("adminstats", admin_stats_command))
     application.add_handler(CommandHandler("poweron", poweron_command))
     application.add_handler(CommandHandler("poweroff", poweroff_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
-    application.add_handler(CommandHandler("getfileid", get_photo_id))
     application.add_handler(CommandHandler("broadcast_photo", broadcast_photo_command))
+    application.add_handler(CommandHandler("getfileid", get_photo_id))
+    application.add_handler(CommandHandler("forward_all", forward_all_command))
+    application.add_handler(CommandHandler("show_chats", show_chats_command))
+
+    # Admin commands
+    application.add_handler(CommandHandler("ban", ban_user))
+    application.add_handler(CommandHandler("kick", kick_user))
+    application.add_handler(CommandHandler("mute", mute_user))
+
+    # Message handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Error handler ko yahan add kiya gaya hai
     application.add_error_handler(error_handler)
 
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", "8000")),
-        url_path=TELEGRAM_BOT_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
-    )
+    # --- Start the bot ---
+    if WEBHOOK_URL:
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.environ.get("PORT", "8443")),
+            url_path=TELEGRAM_BOT_TOKEN,
+            webhook_url=WEBHOOK_URL + TELEGRAM_BOT_TOKEN
+        )
+    else:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
