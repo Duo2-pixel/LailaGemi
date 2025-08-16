@@ -4,7 +4,7 @@ from collections import defaultdict
 import google.generativeai as genai
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.ext import CallbackDataFilter
+from telegram.ext import CallbackQueryHandler
 from dotenv import load_dotenv
 import time
 import json
