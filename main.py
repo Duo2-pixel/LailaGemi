@@ -818,7 +818,7 @@ def main() -> None:
             listen="0.0.0.0",
             port=PORT,
             url_path=f"/{TELEGRAM_BOT_TOKEN}",
-            webhook_url=f"{WEBHOOK_URL}{TELEGRAM_BOT_TOKEN}"
+            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
         )
         logger.info(f"Bot started with webhook on port {PORT}")
     # To run in polling mode
